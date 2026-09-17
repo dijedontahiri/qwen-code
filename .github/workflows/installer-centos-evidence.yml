@@ -1,0 +1,119 @@
+name: Installer CentOS 7 evidence
+
+on:
+  push:
+    branches:
+      - ci/12115-centos-evidence-20260917
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: d0be4543e838102e5b3fd85a9860af7bdb8ee5d8
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Prepare actual before and after installer sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/centos-evidence/bin"
+          git show f822124af568c0cb0d9d2da53242bb8903f0f0eb:scripts/installation/install-qwen-standalone.sh > "$RUNNER_TEMP/centos-evidence/before.sh"
+          cp scripts/installation/install-qwen-standalone.sh "$RUNNER_TEMP/centos-evidence/after.sh"
+          cp scripts/tests/install-glibc-preflight.test.js "$RUNNER_TEMP/centos-evidence/original-test.js"
+          cp scripts/installation/install-qwen-standalone.sh "$RUNNER_TEMP/centos-evidence/original-pr-installer.sh"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'centos-evidence/after.sh'
+          source = path.read_text()
+          start = source.index('detect_glibc_version() {')
+          end = source.index('\nglibc_version_at_least() {', start)
+          section = source[start:end]
+          old = '            NR == 1 {'
+          assert section.count(old) == 1
+          path.write_text(source[:start] + section.replace(old, '            NR == 1 && /GNU libc|GNU C Library|GLIBC/ {') + source[end:])
+          PY
+          cat > "$RUNNER_TEMP/centos-evidence/bin/curl" <<'SH'
+          #!/bin/sh
+          echo 'NETWORK_DOWNLOAD_WAS_ATTEMPTED' >&2
+          exit 91
+          SH
+          chmod +x "$RUNNER_TEMP/centos-evidence/bin/curl"
+          bash -n "$RUNNER_TEMP/centos-evidence/before.sh"
+          bash -n "$RUNNER_TEMP/centos-evidence/after.sh"
+      - name: Pull and record native CentOS 7 runtime
+        shell: bash
+        run: |
+          set -o pipefail
+          docker pull centos:7
+          docker image inspect centos:7 --format '{{json .RepoDigests}}' | tee "$RUNNER_TEMP/centos-evidence/image-digests.txt"
+          docker run --rm --network none centos:7 bash -c 'cat /etc/centos-release; getconf GNU_LIBC_VERSION' | tee "$RUNNER_TEMP/centos-evidence/centos-environment.txt"
+          node --version | tee "$RUNNER_TEMP/centos-evidence/node-version.txt"
+      - name: Reproduce the bundled Node runtime failure on native glibc 2.17
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_binary="$(readlink -f "$(command -v node)")"
+          set +e
+          docker run --rm --network none -v "$node_binary:/usr/local/bin/qwen-bundled-node:ro" centos:7 /usr/local/bin/qwen-bundled-node --version > "$RUNNER_TEMP/centos-evidence/runtime-before.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/centos-evidence/runtime-before.log"
+          echo "exit=$result" >> "$RUNNER_TEMP/centos-evidence/runtime-before.log"
+          test "$result" -ne 0
+          grep -E 'GLIBC_2\.(27|28)' "$RUNNER_TEMP/centos-evidence/runtime-before.log"
+      - name: Compare whole installer behavior before and after on CentOS 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variant in before after; do
+            set +e
+            docker run --rm --network none -v "$RUNNER_TEMP/centos-evidence:/evidence:ro" -e "VARIANT=$variant" -e QWEN_INSTALL_ROOT=/tmp/qwen-install centos:7 bash -c 'export PATH="/evidence/bin:$PATH"; exec bash "/evidence/$VARIANT.sh" --method standalone --mirror github --version 0.24.0 --no-modify-path' > "$RUNNER_TEMP/centos-evidence/installer-$variant.log" 2>&1
+            result=$?
+            set -e
+            cat "$RUNNER_TEMP/centos-evidence/installer-$variant.log"
+            echo "exit=$result" >> "$RUNNER_TEMP/centos-evidence/installer-$variant.log"
+            test "$result" -eq 1
+          done
+          grep -F 'NETWORK_DOWNLOAD_WAS_ATTEMPTED' "$RUNNER_TEMP/centos-evidence/installer-before.log"
+          grep -F 'requires glibc 2.28 or newer; this system has glibc 2.17' "$RUNNER_TEMP/centos-evidence/installer-after.log"
+          if grep -F 'NETWORK_DOWNLOAD_WAS_ATTEMPTED' "$RUNNER_TEMP/centos-evidence/installer-after.log"; then
+            echo 'Unexpected network attempt after incompatible glibc was detected' >&2
+            exit 1
+          fi
+      - name: Verify supported host remains on the download path
+        shell: bash
+        run: |
+          set -euo pipefail
+          getconf GNU_LIBC_VERSION | tee "$RUNNER_TEMP/centos-evidence/ubuntu-environment.txt"
+          mkdir -p "$RUNNER_TEMP/centos-evidence/supported-home"
+          set +e
+          HOME="$RUNNER_TEMP/centos-evidence/supported-home" PATH="$RUNNER_TEMP/centos-evidence/bin:$PATH" QWEN_INSTALL_ROOT="$RUNNER_TEMP/centos-evidence/supported-install" bash "$RUNNER_TEMP/centos-evidence/after.sh" --method standalone --mirror github --version 0.24.0 --no-modify-path > "$RUNNER_TEMP/centos-evidence/installer-supported.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/centos-evidence/installer-supported.log"
+          echo "exit=$result" >> "$RUNNER_TEMP/centos-evidence/installer-supported.log"
+          test "$result" -eq 1
+          grep -F 'NETWORK_DOWNLOAD_WAS_ATTEMPTED' "$RUNNER_TEMP/centos-evidence/installer-supported.log"
+          if grep -F 'requires glibc 2.28 or newer' "$RUNNER_TEMP/centos-evidence/installer-supported.log"; then
+            echo 'Supported host was falsely rejected' >&2
+            exit 1
+          fi
+      - name: Preserve genuine native-runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-native-centos-evidence
+          path: ${{ runner.temp }}/centos-evidence
+          retention-days: 14
+          if-no-files-found: warn
