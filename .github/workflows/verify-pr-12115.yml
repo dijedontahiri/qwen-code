@@ -1,0 +1,168 @@
+name: Verify installer PR 12115
+
+on:
+  push:
+    branches:
+      - ci/12115-verify-20260917
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-installer-pr-12115
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      EXPECTED_HEAD: d0be4543e838102e5b3fd85a9860af7bdb8ee5d8
+      EXPECTED_BASE: f822124af568c0cb0d9d2da53242bb8903f0f0eb
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: d0be4543e838102e5b3fd85a9860af7bdb8ee5d8
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Prepare bounded review follow-up
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/installer-validation"
+          cat > "$RUNNER_TEMP/installer-validation/follow-up.py" <<'PY'
+          import pathlib
+          import subprocess
+          import sys
+
+          installer = pathlib.Path('scripts/installation/install-qwen-standalone.sh')
+          test = pathlib.Path('scripts/tests/install-glibc-preflight.test.js')
+          mode = sys.argv[1]
+          if mode == 'test':
+              for path, expected in [
+                  (installer, 'fca9bd26fe499589edc90da760c3ba958997074c'),
+                  (test, '6f07a08dd363ae256f0c4414d7660115b6341116'),
+              ]:
+                  actual = subprocess.check_output(['git', 'hash-object', str(path)], text=True).strip()
+                  if actual != expected:
+                      raise SystemExit(f'Unexpected source blob for {path}: {actual}')
+              source = test.read_text()
+              old = '  useUnknownLibc = false,\n'
+              new = old + "  unknownLibcOutput = 'musl libc (x86_64)\\nVersion 1.2.5',\n"
+              assert source.count(old) == 1
+              source = source.replace(old, new)
+              old = 'echo "musl libc (x86_64)"\necho "Version 1.2.5"'
+              new = "cat <<'QWEN_TEST_LIBC'\n${unknownLibcOutput}\nQWEN_TEST_LIBC"
+              assert source.count(old) == 1
+              source = source.replace(old, new)
+              anchor = "  itOnUnix('allows glibc 2.28 to continue to the release download', () => {"
+              regression = '''  itOnUnix('leaves unknown libc with a version on the first line unchanged', () => {
+              const result = runInstaller({
+                glibcVersion: '1.2',
+                useLddFallback: true,
+                useUnknownLibc: true,
+                unknownLibcOutput: 'unknown libc 1.2.5',
+              });
+              try {
+                expect(result.status).toBe(1);
+                expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
+                expect(existsSync(result.curlMarker)).toBe(true);
+              } finally {
+                cleanup(result);
+              }
+            });
+
+          '''
+              assert source.count(anchor) == 1
+              test.write_text(source.replace(anchor, regression + anchor))
+          elif mode == 'fix':
+              source = installer.read_text()
+              start = source.index('detect_glibc_version() {')
+              end = source.index('\nglibc_version_at_least() {', start)
+              original = source[start:end]
+              old = '            NR == 1 {'
+              new = '            NR == 1 && /GNU libc|GNU C Library|GLIBC/ {'
+              assert original.count(old) == 1
+              installer.write_text(source[:start] + original.replace(old, new) + source[end:])
+          else:
+              raise SystemExit('Unknown mode')
+          PY
+      - name: Install repository dependencies and build prerequisites
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci 2>&1 | tee "$RUNNER_TEMP/installer-validation/npm-ci.log"
+      - name: Add regression and verify that it fails before the fix
+        shell: bash
+        run: |
+          python3 "$RUNNER_TEMP/installer-validation/follow-up.py" test
+          set +e
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js -t 'leaves unknown libc with a version on the first line unchanged' > "$RUNNER_TEMP/installer-validation/before.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/installer-validation/before.log"
+          test "$result" -eq 1
+          grep -F 'leaves unknown libc with a version on the first line unchanged' "$RUNNER_TEMP/installer-validation/before.log"
+          grep -F 'AssertionError' "$RUNNER_TEMP/installer-validation/before.log"
+          grep -F 'requires glibc 2.28 or newer' "$RUNNER_TEMP/installer-validation/before.log"
+      - name: Apply narrow libc identity fix and format the regression file
+        shell: bash
+        run: |
+          python3 "$RUNNER_TEMP/installer-validation/follow-up.py" fix
+          npx --no-install prettier --write scripts/tests/install-glibc-preflight.test.js
+          bash -n scripts/installation/install-qwen-standalone.sh
+          git diff --check
+          git diff > "$RUNNER_TEMP/installer-validation/review-follow-up.patch"
+      - name: Run the complete installer regression file
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js 2>&1 | tee "$RUNNER_TEMP/installer-validation/after.log"
+          npx --no-install prettier --check scripts/tests/install-glibc-preflight.test.js
+      - name: Run required full repository preflight
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run preflight 2>&1 | tee "$RUNNER_TEMP/installer-validation/preflight.log"
+      - name: Audit exact scope and publish only after every gate passes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          expected = {'scripts/installation/install-qwen-standalone.sh', 'scripts/tests/install-glibc-preflight.test.js'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if changed != expected:
+              raise SystemExit(f'Refusing to publish unrelated changes: {changed}')
+          if subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], text=True).strip():
+              raise SystemExit('Refusing to publish with untracked files')
+          PY
+          gh auth setup-git
+          remote_head="$(git ls-remote origin refs/heads/fix/7002-glibc-preflight | cut -f1)"
+          test "$remote_head" = "$EXPECTED_HEAD"
+          upstream_head="$(git ls-remote https://github.com/QwenLM/qwen-code.git refs/heads/main | cut -f1)"
+          test "$upstream_head" = "$EXPECTED_BASE"
+          git config user.name 'dijedontahiri'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          git add scripts/installation/install-qwen-standalone.sh scripts/tests/install-glibc-preflight.test.js
+          git diff --cached --check
+          git diff --cached --stat
+          git -c core.hooksPath=/dev/null commit -m 'fix(installer): recognize GNU libc in ldd fallback'
+          git push origin HEAD:refs/heads/fix/7002-glibc-preflight
+          git rev-parse HEAD | tee "$RUNNER_TEMP/installer-validation/published-head.txt"
+      - name: Preserve genuine validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-pr-12115-validation
+          path: ${{ runner.temp }}/installer-validation
+          retention-days: 14
+          if-no-files-found: warn
