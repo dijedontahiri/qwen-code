@@ -1,0 +1,111 @@
+name: Issue 12151 synced-head validation
+on:
+  push:
+    branches: [validation/12151-main]
+permissions:
+  contents: read
+env:
+  CI: 'true'
+  CANDIDATE_SHA: 66e433d76d1631dfa5a84d6222e8a2b2d81dfade
+  BASE_SHA: 8500c0d88286a9492b8dfc9ad6ecad91cd712bc6
+  PRE_SYNC_SHA: 2d1b9b2509666a0b9ed6b8c005238b6f40391447
+  QWEN_DEBUG_LOG_FILE: '0'
+  QWEN_SANDBOX: 'false'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 66e433d76d1631dfa5a84d6222e8a2b2d81dfade
+          fetch-depth: 8
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify sync, exact four-file scope and unchanged contribution
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          printf '%s\n' docs/developers/development/gitignore-cache.md integration-tests/glob-ignore-cache.test.ts packages/core/src/utils/git-ignore-parser-cache.test.ts packages/core/src/utils/gitIgnoreParser.ts | sort > "$RUNNER_TEMP/expected-files.txt"
+          git diff --name-only "$BASE_SHA" HEAD | sort > "$RUNNER_TEMP/actual-files.txt"
+          diff -u "$RUNNER_TEMP/expected-files.txt" "$RUNNER_TEMP/actual-files.txt"
+          git diff --exit-code "$PRE_SYNC_SHA" HEAD -- docs/developers/development/gitignore-cache.md integration-tests/glob-ignore-cache.test.ts packages/core/src/utils/git-ignore-parser-cache.test.ts packages/core/src/utils/gitIgnoreParser.ts
+          git diff --check "$BASE_SHA" HEAD
+          git config user.name 'Qwen validation'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          git fetch --depth=1 origin 71bc33b8785d2ea9c03127a051a6f1008afb8199
+          test ! -e .qwen/scripts/12151-cli-memory.mjs
+          mkdir -p .qwen/scripts
+          git check-ignore .qwen/scripts/12151-cli-memory.mjs
+          git show 71bc33b8785d2ea9c03127a051a6f1008afb8199:.qwen/scripts/12151-cli-memory.mjs > .qwen/scripts/12151-cli-memory.mjs
+      - name: Locked installation and normal workspace build
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund 2>&1 | tee "$RUNNER_TEMP/qwen-12151-sync-build.log"
+      - name: Existing and new core regressions
+        working-directory: packages/core
+        run: |
+          set -euo pipefail
+          node ../../node_modules/vitest/vitest.mjs run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts src/services/fileDiscoveryService.test.ts src/tools/glob.test.ts --maxWorkers=1 2>&1 | tee "$RUNNER_TEMP/qwen-12151-sync-core.log"
+      - name: Verify the newly merged upstream documentation contract
+        working-directory: packages/cli
+        run: |
+          set -euo pipefail
+          node ../../node_modules/vitest/vitest.mjs run src/serve/rest-integration-docs-contract.test.ts --maxWorkers=1 2>&1 | tee "$RUNNER_TEMP/qwen-12151-sync-docs.log"
+      - name: Focused lint, formatting and actual CLI E2E
+        run: |
+          set -euo pipefail
+          node node_modules/eslint/bin/eslint.js packages/core/src/utils/gitIgnoreParser.ts packages/core/src/utils/git-ignore-parser-cache.test.ts integration-tests/glob-ignore-cache.test.ts --max-warnings 0
+          node node_modules/prettier/bin/prettier.cjs --check packages/core/src/utils/gitIgnoreParser.ts packages/core/src/utils/git-ignore-parser-cache.test.ts integration-tests/glob-ignore-cache.test.ts docs/developers/development/gitignore-cache.md
+          node node_modules/vitest/vitest.mjs run --root ./integration-tests glob-ignore-cache.test.ts --retry=0 2>&1 | tee "$RUNNER_TEMP/qwen-12151-sync-cli.log"
+      - name: Actual CLI constrained-heap before and after proof
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          mkdir -p "$RUNNER_TEMP/qwen-12151-memory"
+          cp packages/core/src/utils/gitIgnoreParser.ts "$RUNNER_TEMP/qwen-12151-memory/candidate.ts"
+          cp packages/core/dist/src/utils/gitIgnoreParser.js "$RUNNER_TEMP/qwen-12151-memory/candidate.js"
+          restore_parser() {
+            cp "$RUNNER_TEMP/qwen-12151-memory/candidate.ts" packages/core/src/utils/gitIgnoreParser.ts
+            cp "$RUNNER_TEMP/qwen-12151-memory/candidate.js" packages/core/dist/src/utils/gitIgnoreParser.js
+          }
+          trap restore_parser EXIT
+          git show 455f3d07953ff3c2fe2fbd4f0cb06d98c03af169:packages/core/src/utils/gitIgnoreParser.ts > packages/core/src/utils/gitIgnoreParser.ts
+          node --input-type=module -e "import {transform} from 'esbuild'; import fs from 'node:fs'; const source=fs.readFileSync('packages/core/src/utils/gitIgnoreParser.ts','utf8'); const result=await transform(source,{loader:'ts',format:'esm',target:'node22'}); fs.writeFileSync('packages/core/dist/src/utils/gitIgnoreParser.js',result.code);"
+          npm run bundle > "$RUNNER_TEMP/qwen-12151-memory/baseline-bundle.log" 2>&1
+          if grep -R -q 'chainIgnorers' dist --include='*.js'; then
+            echo 'Baseline bundle unexpectedly contains candidate code' >&2
+            exit 1
+          fi
+          node --import tsx .qwen/scripts/12151-cli-memory.mjs before 30000 384 "$RUNNER_TEMP/qwen-12151-memory"
+          restore_parser
+          npm run bundle > "$RUNNER_TEMP/qwen-12151-memory/candidate-bundle.log" 2>&1
+          grep -R -q 'chainIgnorers' dist --include='*.js'
+          node --import tsx .qwen/scripts/12151-cli-memory.mjs after 30000 384 "$RUNNER_TEMP/qwen-12151-memory"
+          cmp packages/core/src/utils/gitIgnoreParser.ts "$RUNNER_TEMP/qwen-12151-memory/candidate.ts"
+          cmp packages/core/dist/src/utils/gitIgnoreParser.js "$RUNNER_TEMP/qwen-12151-memory/candidate.js"
+      - name: Final restored-bundle E2E and clean-head audit
+        run: |
+          set -euo pipefail
+          node node_modules/vitest/vitest.mjs run --root ./integration-tests glob-ignore-cache.test.ts --retry=0 2>&1 | tee "$RUNNER_TEMP/qwen-12151-sync-final-cli.log"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --check
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          printf 'Synced contribution %s, base %s: normal workspace build, 115 core regressions, upstream documentation contract, real CLI E2E and constrained-heap CLI before/after proof passed. All four contribution files are byte-identical to pre-sync %s. Full preflight is tracked separately in run 35309099872.\n' "$CANDIDATE_SHA" "$BASE_SHA" "$PRE_SYNC_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: issue-12151-synced-head-evidence
+          path: |
+            ${{ runner.temp }}/qwen-12151-sync-*.log
+            ${{ runner.temp }}/qwen-12151-memory/
+          retention-days: 14
+          if-no-files-found: warn
