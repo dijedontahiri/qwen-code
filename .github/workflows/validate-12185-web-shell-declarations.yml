@@ -1,0 +1,53 @@
+name: Validate issue 12185 web-shell declarations
+
+on:
+  push:
+    branches:
+      - validation/12185-web-shell-declarations-20260918
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Reproduce declaration alias leak on upstream base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --force e596a410bbd58313b6db069eed1cbb33bd3dbd8f
+          rm -rf packages/web-shell/dist
+          npm run build --workspace @qwen-code/web-shell
+          mapfile -t offenders < <(grep -RIlE "['\"]@/" packages/web-shell/dist/types --include='*.d.ts' | sort)
+          printf 'Baseline offenders (%s):\n%s\n' "${#offenders[@]}" "${offenders[*]}"
+          test "${#offenders[@]}" -eq 3
+          printf '%s\n' "${offenders[@]}" | grep -F 'packages/web-shell/dist/types/components/ui/alert-dialog.d.ts'
+          printf '%s\n' "${offenders[@]}" | grep -F 'packages/web-shell/dist/types/components/ui/field.d.ts'
+          printf '%s\n' "${offenders[@]}" | grep -F 'packages/web-shell/dist/types/components/ui/toggle-group.d.ts'
+      - name: Build and validate candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --force be38a224988fca5d068d099ee136bcb8736c800f
+          rm -rf packages/web-shell/dist
+          npm run build --workspace @qwen-code/web-shell
+          ! grep -RIlE "['\"]@/" packages/web-shell/dist/types --include='*.d.ts'
+          npm run verify --workspace @qwen-code/web-shell
+          git diff --check e596a410bbd58313b6db069eed1cbb33bd3dbd8f...HEAD
+      - name: Full repository preflight
+        run: npm run preflight
+      - name: Verify tested head and worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 'be38a224988fca5d068d099ee136bcb8736c800f'
+          git diff --check e596a410bbd58313b6db069eed1cbb33bd3dbd8f...HEAD
+          git status --short
