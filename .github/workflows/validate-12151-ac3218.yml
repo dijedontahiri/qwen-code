@@ -1,0 +1,59 @@
+name: Validate PR 12156 review follow-up
+
+on:
+  push:
+    branches:
+      - validation/12151-ac3218
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCT_SHA: ac3218d714c10915dc410761a5dec011a42465a0
+    steps:
+      - name: Check out immutable product source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Install dependencies
+        run: npm ci
+      - name: Focused cache regressions
+        run: |
+          cd packages/core
+          npx vitest run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts
+      - name: Format and diff checks
+        run: |
+          npx prettier --experimental-cli --check packages/core/src/utils/git-ignore-parser-cache.test.ts integration-tests/cli/glob-ignore-cache.test.ts docs/developers/development/gitignore-cache.md
+          git diff --check
+      - name: Build CLI bundle
+        run: npm run bundle
+      - name: Bundled CLI ignore semantics regression
+        run: node node_modules/vitest/vitest.mjs run --root ./integration-tests cli/glob-ignore-cache.test.ts --retry=0
+      - name: Final exact-source audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
