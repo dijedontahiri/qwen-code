@@ -1,0 +1,51 @@
+name: Diagnose issue 12185 external size
+
+on:
+  push:
+    branches:
+      - diagnostic/12185-external-size-20260918
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+      - name: Install without repository prepare
+        run: npm ci --ignore-scripts
+      - name: Measure export renderer for each newly externalized dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          measure() {
+            local label="$1"
+            local extra="$2"
+            echo "===== $label ====="
+            rm -rf packages/web-shell/dist
+            if [[ "$extra" == "ALL" ]]; then
+              unset QWEN_12185_DIAGNOSTIC_EXTERNAL
+            else
+              export QWEN_12185_DIAGNOSTIC_EXTERNAL="$extra"
+            fi
+            (cd packages/web-shell && npx vite build --config vite.lib.config.ts --mode transcript) >"/tmp/web-shell-$label.log" 2>&1
+            tail -n 8 "/tmp/web-shell-$label.log"
+            set +e
+            EXPORT_HTML_METAFILE="/tmp/meta-$label.json" node packages/web-templates/src/export-html/build.mjs >"/tmp/export-$label.log" 2>&1
+            local rc=$?
+            set -e
+            grep -E 'Document export top inputs|Document export renderer JS is' "/tmp/export-$label.log" || true
+            echo "export-build-exit=$rc"
+          }
+
+          measure baseline __none__
+          measure xterm @xterm/xterm
+          measure xterm_fit @xterm/addon-fit
+          measure react_table @tanstack/react-table
+          measure react_virtual @tanstack/react-virtual
+          measure fzf fzf
+          measure ext_apps @modelcontextprotocol/ext-apps
+          measure all ALL
