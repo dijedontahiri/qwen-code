@@ -187,7 +187,8 @@ export default defineConfig(({ mode }) => ({
       fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
-      external: shouldExternalizeWebShellDependency,
+      external: (id) =>
+        shouldExternalizeWebShellDependency(id, mode === 'transcript'),
     },
   },
   define: {
