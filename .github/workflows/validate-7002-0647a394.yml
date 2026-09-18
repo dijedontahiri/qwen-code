@@ -108,6 +108,9 @@ jobs:
           git restore --source="$PRODUCT_SHA" -- "$file"
           git diff --exit-code "$PRODUCT_SHA" -- "$file"
 
+      - name: Build installer packaging prerequisite
+        run: npm run build:ts --workspace=packages/audio-capture
+
       - name: Focused installer regressions
         run: |
           npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js
