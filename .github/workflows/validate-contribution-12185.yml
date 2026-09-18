@@ -46,11 +46,7 @@ jobs:
           diff -u /tmp/expected-files /tmp/actual-files
 
       - name: Install repository dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          corepack enable
-          pnpm install --frozen-lockfile
+        run: node scripts/setup-worktree.js
 
       - name: Prove declaration baseline fails before rewrite
         shell: bash
