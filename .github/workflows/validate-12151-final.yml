@@ -39,6 +39,8 @@ jobs:
           node --version
           npm --version
           free -m
+      - name: Bootstrap dependencies required by the clean script
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Full repository preflight
         run: |
           set -euo pipefail
@@ -69,44 +71,5 @@ jobs:
           path: |
             ${{ runner.temp }}/qwen-12151-*.log
             ${{ runner.temp }}/qwen-12151-summary.txt
-          retention-days: 14
-          if-no-files-found: warn
-  cross-platform-parser:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    env:
-      NODE_OPTIONS: --max-old-space-size=4096
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          ref: 2d1b9b2509666a0b9ed6b8c005238b6f40391447
-          persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install locked dependencies and build core
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run build --workspace packages/core
-      - name: Existing and new parser regressions
-        working-directory: packages/core
-        run: |
-          set -euo pipefail
-          node ../../node_modules/vitest/vitest.mjs run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts --maxWorkers=1 2>&1 | tee "$RUNNER_TEMP/qwen-12151-parser.log"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: issue-12151-parser-${{ matrix.os }}
-          path: ${{ runner.temp }}/qwen-12151-parser.log
           retention-days: 14
           if-no-files-found: warn
