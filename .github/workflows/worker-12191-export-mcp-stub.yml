@@ -1,4 +1,4 @@
-name: Apply and validate issue 12185 document bridge boundary
+name: Verify issue 12185 document and package boundary
 
 on:
   push:
@@ -6,168 +6,344 @@ on:
       - worker/12191-export-mcp-stub-20260918
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: qwen-maintenance-12191
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: 2ab029854f1c9c81d86e8a57e57d98fef92df51d
+  PARENT_SHA: eb48b52da82a60341fd4a3b42a2d7410aa734ad7
+  SOURCE_TREE: f68a972ca09c8764d2cbf31bfffce33a95e4d44c
 
 jobs:
-  apply-and-validate:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: fix/12185-web-shell-package-artifacts
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.16.0
-          cache: npm
-      - name: Verify contribution head has not moved
-        run: test "$(git rev-parse HEAD)" = "eb48b52da82a60341fd4a3b42a2d7410aa734ad7"
-      - name: Apply document-only MCP App bridge stub
+    timeout-minutes: 110
+    defaults:
+      run:
         shell: bash
+    steps:
+      - name: Checkout immutable product candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Record source and inspect isolated environment
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          build = Path('packages/web-templates/src/export-html/build.mjs')
-          text = build.read_text()
-
-          forbidden_anchor = """  {
-              pattern: /(^|\\/)node_modules\\/(codemirror|@codemirror)\\//,
-              why:
-                'A read-only export has no composer. CodeMirror last reached it through ' +
-                'three composer-tag getters that UserMessage imported from ' +
-                'hooks/useComposerCore.ts; they now live in utils/composerTag.ts, which ' +
-                'is editor-free. Import from there, not from the composer hook.',
-            },
-          ];
-          """
-          forbidden_replacement = """  {
-              pattern: /(^|\\/)node_modules\\/(codemirror|@codemirror)\\//,
-              why:
-                'A read-only export has no composer. CodeMirror last reached it through ' +
-                'three composer-tag getters that UserMessage imported from ' +
-                'hooks/useComposerCore.ts; they now live in utils/composerTag.ts, which ' +
-                'is editor-free. Import from there, not from the composer hook.',
-            },
-            {
-              pattern:
-                /(^|\\/)node_modules\\/@modelcontextprotocol\\/(ext-apps|sdk)\\//,
-              why:
-                'Interactive MCP Apps cannot initialize in document exports: ' +
-                'WebShellTranscript is rendered without mcpAppBaseUrl, so McpApp falls ' +
-                'back to its recorded text. @modelcontextprotocol/ext-apps/app-bridge ' +
-                'is resolved to src/document-mcp-app-bridge-stub.ts below.',
-            },
-          ];
-          """
-          if forbidden_anchor not in text:
-              raise SystemExit('FORBIDDEN_DOCUMENT_INPUTS anchor changed')
-          text = text.replace(forbidden_anchor, forbidden_replacement, 1)
-
-          stub_anchor = "const documentMermaidStub = join(srcDir, 'document-mermaid-stub.ts');\n"
-          stub_replacement = stub_anchor + "const documentMcpAppBridgeStub = join(\n  srcDir,\n  'document-mcp-app-bridge-stub.ts',\n);\n"
-          if text.count(stub_anchor) != 1:
-              raise SystemExit('document stub anchor changed')
-          text = text.replace(stub_anchor, stub_replacement, 1)
-
-          resolver_tail = "      path: documentMermaidStub,\n    }));\n"
-          if text.count(resolver_tail) != 1:
-              raise SystemExit('mermaid resolver tail changed')
-          text = text.replace(
-              resolver_tail,
-              resolver_tail
-              + "    build.onResolve(\n"
-              + "      { filter: /^@modelcontextprotocol\\/ext-apps\\/app-bridge$/ },\n"
-              + "      () => ({ path: documentMcpAppBridgeStub }),\n"
-              + "    );\n",
-              1,
-          )
-          build.write_text(text)
-
-          stub = Path(
-              'packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts'
-          )
-          if stub.exists():
-              raise SystemExit(f'{stub} already exists')
-          stub.write_text("""/**
-           * @license
-           * Copyright 2026 Qwen Team
-           * SPDX-License-Identifier: Apache-2.0
-           */
-
-          /**
-           * MCP Apps are interactive and require the daemon-backed `mcpAppBaseUrl`.
-           * Exported transcript documents intentionally never provide that URL, so
-           * `McpApp` renders its recorded fallback text and this bridge is unreachable.
-           * Keep a fail-closed value stub so the document IIFE does not re-bundle the
-           * browser bridge, its MCP SDK, or their transitive dependencies.
-           */
-          export class AppBridge {
-            constructor() {
-              throw new Error(
-                'MCP App bridges are unavailable in read-only exported documents.',
-              );
-            }
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/qwen-12191-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$OUT"
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PARENT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          python3 - <<'PY'
+          import os, subprocess
+          expected = {
+            '.qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md',
+            'packages/web-shell/build-boundary.ts',
+            'packages/web-shell/client/build-boundary.test.ts',
+            'packages/web-shell/vite.lib.config.ts',
+            'packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx',
+            'packages/web-templates/src/export-html/build.mjs',
+            'packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts',
           }
-
-          export class PostMessageTransport {
-            constructor() {
-              throw new Error(
-                'MCP App transports are unavailable in read-only exported documents.',
-              );
-            }
-          }
-          """)
+          changed = set(subprocess.check_output(['git','diff','--name-only',os.environ['PARENT_SHA'],os.environ['SOURCE_SHA']], text=True).splitlines())
+          assert changed == expected, (sorted(changed), sorted(expected))
+          print('Exact seven-file repair scope verified; no validation workflow in product diff.')
           PY
-          npx prettier --experimental-cli --write \
-            packages/web-templates/src/export-html/build.mjs \
-            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts
-          git diff --check
-          git diff -- \
-            packages/web-templates/src/export-html/build.mjs \
-            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts
-      - name: Install dependencies without duplicate prepare build
+          {
+            printf 'repository=%s\nworkflow_sha=%s\nsource_sha=%s\nparent_sha=%s\nsource_tree=%s\nrun_id=%s\nattempt=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$SOURCE_SHA" "$PARENT_SHA" "$SOURCE_TREE" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            date -u +%FT%TZ
+            node --version
+            npm --version
+            df -h . "$RUNNER_TEMP"
+            free -m
+          } | tee "$OUT/provenance.txt"
+          git diff --check "$PARENT_SHA" "$SOURCE_SHA"
+          git diff "$PARENT_SHA" "$SOURCE_SHA" > "$OUT/repair.diff"
+      - name: Install locked dependencies without duplicate prepare build
         env:
           QWEN_SKIP_PREPARE: '1'
-        run: npm ci
-      - name: Build export prerequisites
         run: |
-          npm run build --workspace=packages/browser-use
-          npm run build --workspace=packages/core
-          npm run build --workspace=packages/acp-bridge
-          npm run build --workspace=packages/sdk-typescript
-      - name: Build and verify published web-shell package
-        run: npm run build --workspace=packages/web-shell
-      - name: Focused web-shell package-boundary regression
+          set +e
+          npm ci --no-audit --progress=false > "$OUT/npm-ci.log" 2>&1
+          code=$?
+          set -e
+          tail -n 35 "$OUT/npm-ci.log"
+          echo "$code" > "$OUT/npm-ci.exit"
+          exit "$code"
+      - name: Require canonical formatting without changing the tested tree
         run: |
-          cd packages/web-shell
-          npx vitest run --config vitest.config.ts client/build-boundary.test.ts
-      - name: Verify document renderer stays inside its hard boundary
-        shell: bash
-        run: |
-          EXPORT_HTML_METAFILE=/tmp/export-meta.json node packages/web-templates/src/export-html/build.mjs | tee /tmp/export-build.log
-          grep -E 'Document export renderer JS is [0-9]+ bytes' /tmp/export-build.log
-          if grep -Eq 'node_modules/@modelcontextprotocol/(ext-apps|sdk)/' /tmp/export-meta.json; then
-            echo 'MCP App runtime leaked into the document renderer' >&2
+          files=(
+            packages/web-shell/build-boundary.ts
+            packages/web-shell/client/build-boundary.test.ts
+            packages/web-shell/vite.lib.config.ts
+            packages/web-shell/package.json
+            packages/web-shell/scripts/rewrite-declaration-aliases.mjs
+            packages/web-shell/scripts/verify-package.mjs
+            packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx
+            packages/web-templates/src/export-html/build.mjs
+            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts
+          )
+          if ! npx --no-install prettier --experimental-cli --check "${files[@]}"; then
+            npx --no-install prettier --experimental-cli --write "${files[@]}"
+            git diff > "$OUT/format-correction.diff"
+            cat "$OUT/format-correction.diff"
+            git restore --source="$SOURCE_SHA" --worktree -- "${files[@]}"
+            echo 'Candidate needs a real formatting commit; product validation did not pass.' >&2
             exit 1
           fi
-      - name: Targeted formatting and source audit
+      - name: Build actual workspace prerequisites and document renderer
         run: |
-          npx prettier --experimental-cli --check \
-            packages/web-templates/src/export-html/build.mjs \
-            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts \
+          set +e
+          npm run build > "$OUT/build.log" 2>&1
+          code=$?
+          set -e
+          tail -n 55 "$OUT/build.log"
+          echo "$code" > "$OUT/build.exit"
+          exit "$code"
+      - name: Prove public transcript regression fails against parent implementation
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          root=pathlib.Path.cwd(); out=pathlib.Path(os.environ['OUT'])
+          files=['packages/web-shell/build-boundary.ts','packages/web-shell/vite.lib.config.ts']
+          originals={f:(root/f).read_bytes() for f in files}
+          name='externalizes MCP Apps in the public transcript entry'
+          report=out/'negative-externalization.json'
+          try:
+            for f in files:
+              (root/f).write_bytes(subprocess.check_output(['git','show',os.environ['PARENT_SHA']+':'+f]))
+            cmd=['npm','run','test','--workspace=packages/web-shell','--','client/build-boundary.test.ts','-t',name,'--reporter=json','--outputFile='+str(report)]
+            p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
+            (out/'negative-externalization.log').write_text(p.stdout)
+            print(p.stdout[-6000:])
+            assert p.returncode != 0, 'Negative control unexpectedly passed'
+            data=json.loads(report.read_text())
+            failed=[a for s in data['testResults'] for a in s.get('assertionResults',[]) if a['status']=='failed']
+            assert len(failed)==1 and name in failed[0]['fullName'], failed
+            failures='\n'.join(failed[0].get('failureMessages',[]))
+            assert 'expected false to be true' in failures, failures
+            assert data['numFailedTests']==1 and data.get('numRuntimeErrorTestSuites',0)==0, data
+            print('Negative control failed for the intended externalization assertion only.')
+          finally:
+            for f,b in originals.items(): (root/f).write_bytes(b)
+          subprocess.run(['git','diff','--exit-code',os.environ['SOURCE_SHA'],'--',*files],check=True)
+          PY
+      - name: Positive package and MCP App regressions
+        run: |
+          npm run test --workspace=packages/web-shell -- \
+            client/build-boundary.test.ts \
+            client/components/messages/McpApp.document.dom.test.tsx \
+            client/components/messages/McpApp.dom.test.tsx \
+            client/components/messages/McpApp.test.ts \
+            --reporter=default --reporter=json --outputFile.json="$OUT/focused.json" | tee "$OUT/focused.log"
+      - name: Affected types and lint
+        run: |
+          npm run typecheck --workspace=packages/web-shell > "$OUT/types.log" 2>&1
+          npx --no-install eslint \
             packages/web-shell/build-boundary.ts \
             packages/web-shell/client/build-boundary.test.ts \
-            packages/web-shell/vite.lib.config.ts
+            packages/web-shell/vite.lib.config.ts \
+            packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx \
+            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts \
+            --max-warnings 0 > "$OUT/lint.log" 2>&1
           git diff --check
-          test -z "$(git status --porcelain --untracked-files=all | grep -v '^?? packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts$' | grep -v '^ M packages/web-templates/src/export-html/build.mjs$')"
-      - name: Commit and fast-forward contribution branch
-        shell: bash
+      - name: Real declaration and exported-target negative controls
         run: |
-          test "$(git ls-remote origin refs/heads/fix/12185-web-shell-package-artifacts | cut -f1)" = "eb48b52da82a60341fd4a3b42a2d7410aa734ad7"
-          git config user.name "Dijedon"
-          git config user.email "99071957+dijedontahiri@users.noreply.github.com"
-          git add packages/web-templates/src/export-html/build.mjs packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts
-          git commit -m "fix(web-shell): strip MCP app bridge from document exports"
-          git push origin HEAD:fix/12185-web-shell-package-artifacts
+          python3 - <<'PY'
+          import os,pathlib,subprocess
+          root=pathlib.Path.cwd(); out=pathlib.Path(os.environ['OUT']); package=root/'packages/web-shell'
+          def run(name,args,expected=None):
+            p=subprocess.run(args,cwd=package,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
+            (out/(name+'.log')).write_text(p.stdout)
+            print(name, 'exit',p.returncode,p.stdout[-1800:])
+            if expected is None: assert p.returncode==0, name
+            else: assert p.returncode!=0 and expected in p.stdout, name
+          run('raw-declaration-emit',['npx','--no-install','tsc','-p','tsconfig.lib.json'])
+          try:
+            run('alias-negative',['npm','run','verify:package'],'repository-only @/ import leaked into')
+          finally:
+            run('alias-rewrite',['node','scripts/rewrite-declaration-aliases.mjs'])
+          run('alias-positive',['npm','run','verify:package'])
+          target=package/'dist/transcript.js'; saved=out/'transcript.saved.js'
+          target.rename(saved)
+          try:
+            run('export-target-negative',['npm','run','prepublishOnly'],'missing package export target: ./dist/transcript.js')
+          finally: saved.rename(target)
+          run('export-target-positive',['npm','run','prepublishOnly'])
+          PY
+      - name: Verify unchanged document budget and builder negative control
+        run: |
+          python3 - <<'PY'
+          import json,os,pathlib,re,subprocess
+          root=pathlib.Path.cwd(); out=pathlib.Path(os.environ['OUT'])
+          rel='packages/web-templates/src/export-html/build.mjs'; file=root/rel; fixed=file.read_bytes()
+          def build(name):
+            env=dict(os.environ,EXPORT_HTML_METAFILE=str(out/(name+'.metafile.json')))
+            p=subprocess.run(['node',rel],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
+            (out/(name+'.log')).write_text(p.stdout); print(p.stdout[-5000:]); return p
+          try:
+            file.write_bytes(subprocess.check_output(['git','show',os.environ['PARENT_SHA']+':'+rel]))
+            old=build('document-negative')
+            assert old.returncode!=0, 'Old document builder unexpectedly passed with external MCP dependency'
+            assert re.search(r'Document export renderer JS is \d+ bytes; expected <= 1930000',old.stdout), 'Negative control failed for an unrelated reason'
+          finally: file.write_bytes(fixed)
+          new=build('document-positive'); assert new.returncode==0, 'Candidate renderer failed'
+          meta=json.loads((out/'document-positive.metafile.json').read_text())
+          leaked=[x for x in meta['inputs'] if re.search(r'node_modules/@modelcontextprotocol/(ext-apps|sdk)/',x.replace('\\','/'))]
+          assert not leaked, leaked
+          assert any(x.endswith('document-mcp-app-bridge-stub.ts') for x in meta['inputs']), 'Document stub was not exercised'
+          assert 'const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;' in file.read_text(), 'Budget changed'
+          print('Real document build passed its existing budget and MCP dependency guard.')
+          PY
+          npm run test:scripts -- scripts/tests/transcript-css-entry-filter.test.js scripts/tests/export-html-import-meta-guard.test.js | tee "$OUT/export-guards.log"
+      - name: Pack actual SDK and Web Shell artifacts
+        run: |
+          npm pack --workspace=packages/sdk-typescript --pack-destination "$OUT" --json > "$OUT/sdk-pack.log" 2>&1
+          npm pack --workspace=packages/web-shell --pack-destination "$OUT" --json > "$OUT/web-shell-pack.log" 2>&1
+          python3 - <<'PY'
+          import json,os,pathlib,tarfile
+          out=pathlib.Path(os.environ['OUT'])
+          shells=list(out.glob('qwen-code-web-shell-*.tgz')); sdks=list(out.glob('qwen-code-sdk-*.tgz'))
+          assert len(shells)==1 and len(sdks)==1, (shells,sdks)
+          with tarfile.open(shells[0]) as archive:
+            names=set(archive.getnames()); pkg=json.load(archive.extractfile('package/package.json'))
+            targets=[v for export in pkg['exports'].values() for v in export.values()]
+            assert len(targets)==6
+            for target in targets: assert 'package/'+target.removeprefix('./') in names, target
+            assert not any('document-mcp-app-bridge-stub' in n or '/document-export/' in n for n in names)
+            print('Six real tarball export targets exist; no document-only stub in published package.')
+          consumer=out/'consumer'; consumer.mkdir()
+          def installed(name):
+            import subprocess
+            return subprocess.check_output(['node','-p',f"require({json.dumps(name+'/package.json')}).version"],text=True).strip()
+          deps={name:installed(name) for name in ['react','react-dom','@types/react','@types/react-dom','typescript']}
+          deps.update({'@qwen-code/web-shell':'file:'+str(shells[0]),'@qwen-code/sdk':'file:'+str(sdks[0])})
+          (consumer/'package.json').write_text(json.dumps({'name':'qwen-12185-external-consumer','private':True,'type':'module','dependencies':deps}))
+          (consumer/'consumer.ts').write_text("import * as shell from '@qwen-code/web-shell';\nimport * as transcript from '@qwen-code/web-shell/transcript';\nimport * as daemon from '@qwen-code/web-shell/daemon-react-sdk';\nconsole.log(Object.keys(shell),Object.keys(transcript),Object.keys(daemon));\n")
+          (consumer/'tsconfig.json').write_text(json.dumps({'compilerOptions':{'target':'ES2022','module':'ESNext','moduleResolution':'Bundler','lib':['ES2022','DOM','DOM.Iterable'],'strict':True,'skipLibCheck':False,'noEmit':True},'include':['consumer.ts']}))
+          (consumer/'resolve.mjs').write_text("import { existsSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nfor (const name of ['@qwen-code/web-shell','@qwen-code/web-shell/transcript','@qwen-code/web-shell/daemon-react-sdk']) { const url=import.meta.resolve(name); if (!existsSync(fileURLToPath(url))) throw new Error('Missing export '+name); console.log(name,url); }\n")
+          PY
+          (cd "$OUT/consumer" && npm install --no-audit --progress=false) > "$OUT/consumer-install.log" 2>&1
+          node "$OUT/consumer/node_modules/typescript/bin/tsc" -p "$OUT/consumer/tsconfig.json" > "$OUT/consumer-types.log" 2>&1
+          node "$OUT/consumer/resolve.mjs" | tee "$OUT/consumer-resolution.log"
+          ln -s "$OUT/consumer" "$OUT/consumer-link"
+          node --preserve-symlinks --preserve-symlinks-main "$OUT/consumer-link/resolve.mjs" | tee "$OUT/consumer-symlink-resolution.log"
+          node --input-type=module <<'JS'
+          import { build } from 'esbuild';
+          import { writeFile } from 'node:fs/promises';
+          import { join } from 'node:path';
+          for (const link of [false,true]) {
+            const result=await build({absWorkingDir:join(process.env.OUT,link?'consumer-link':'consumer'),entryPoints:['consumer.ts'],bundle:true,write:false,platform:'browser',format:'esm',preserveSymlinks:link,metafile:true,define:{'process.env.NODE_ENV':'"production"'}});
+            await writeFile(join(process.env.OUT,link?'consumer-symlink.metafile.json':'consumer.metafile.json'),JSON.stringify(result.metafile));
+            console.log('Packed browser consumer built:',link?'symlink':'normal',Object.keys(result.metafile.inputs).length,'inputs');
+          }
+          JS
+      - name: Render genuine exported MCP fallback in Chromium
+        run: |
+          npx --no-install playwright install chromium > "$OUT/chromium-install.log" 2>&1
+          node --input-type=module <<'JS'
+          import { chromium } from 'playwright';
+          import { readFile,writeFile } from 'node:fs/promises';
+          import { createServer } from 'node:http';
+          import { join } from 'node:path';
+          import assert from 'node:assert/strict';
+          const dir='packages/web-templates/src/export-html/dist';
+          let html=await readFile(join(dir,'document.html'),'utf8');
+          const js=await readFile(join(dir,'export-transcript-document.js'));
+          const css=await readFile(join(dir,'export-transcript-document.css'));
+          const generated=await readFile('packages/web-templates/src/generated/exportTranscriptDocumentTemplate.ts','utf8');
+          const version=JSON.parse(generated.match(/export const EXPORT_TRANSCRIPT_RENDERER_VERSION = ("[^"]+")/)[1]);
+          const common={createdAt:1,clientReceivedAt:1,updatedAt:1,promptId:'fixture-prompt'};
+          const display={type:'mcp_app',serverName:'fixture',resourceUri:'ui://fixture/app',html:'<main>Interactive app</main>',toolResult:{content:[]},toolArguments:{},fallbackText:'Recorded MCP fixture result'};
+          const blocks=[{...common,id:'question',kind:'user',text:'Show the recorded MCP result.'},{...common,id:'tool',kind:'tool',toolCallId:'fixture-call',toolName:'mcp__fixture__demo',title:'MCP fixture',status:'completed',preview:{kind:'mcp_invocation',serverId:'fixture',toolName:'demo'},rawOutput:display},{...common,id:'answer',kind:'assistant',text:'The recorded result is shown above.'}];
+          const envelope={schemaVersion:1,rendererVersion:version,blocks,metadata:{title:'MCP export boundary verification',exportedAt:new Date().toISOString(),complete:true,truncated:false}};
+          html=html.replaceAll('__EXPORT_NONCE__','qwen-validation-12191');
+          const envelopePattern=/(<script\b[^>]*\bid="transcript-document"[^>]*>)[\s\S]*?(<\/script>)/;
+          assert(envelopePattern.test(html),'Missing document envelope element');
+          html=html.replace(envelopePattern,(_,a,b)=>a+JSON.stringify(envelope).replaceAll('<','\\u003c')+b);
+          await writeFile(join(process.env.OUT,'document-fixture.html'),html);
+          const server=createServer((req,res)=>{if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end(html);}else{res.writeHead(404);res.end();}});
+          await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+          const browser=await chromium.launch();
+          try {
+            const page=await browser.newPage({viewport:{width:1280,height:900}});
+            const errors=[],unexpected=[];
+            page.on('pageerror',error=>errors.push(error.message));
+            const origin='http://127.0.0.1:'+server.address().port;
+            await page.route('**/*',async route=>{
+              const url=new URL(route.request().url());
+              if(url.origin===origin){await route.continue();return;}
+              if(url.hostname==='unpkg.com' && url.pathname.endsWith('/export-transcript-document.js')){await route.fulfill({status:200,contentType:'text/javascript',headers:{'access-control-allow-origin':'*'},body:js});return;}
+              if(url.hostname==='unpkg.com' && url.pathname.endsWith('/export-transcript-document.css')){await route.fulfill({status:200,contentType:'text/css',headers:{'access-control-allow-origin':'*'},body:css});return;}
+              unexpected.push(url.origin+url.pathname); await route.abort();
+            });
+            await page.goto(origin,{waitUntil:'networkidle'});
+            await page.getByText('Recorded MCP fixture result',{exact:true}).waitFor({state:'visible',timeout:15000});
+            assert.equal(await page.locator('iframe').count(),0);
+            assert.deepEqual(errors,[]); assert.deepEqual(unexpected,[]);
+            await page.screenshot({path:join(process.env.OUT,'document-mcp-fallback.png'),fullPage:true});
+            await writeFile(join(process.env.OUT,'browser-result.json'),JSON.stringify({source:process.env.SOURCE_SHA,errors,unexpected,iframeCount:0,recordedFallbackVisible:true}));
+            console.log('Actual document renderer displayed the recorded MCP fallback without iframe, daemon requests, or page errors.');
+          } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}
+          JS
+      - name: Full repository preflight
+        run: |
+          set +e
+          npm run preflight > "$OUT/preflight.log" 2>&1
+          code=$?
+          set -e
+          tail -n 100 "$OUT/preflight.log"
+          echo "$code" > "$OUT/preflight.exit"
+          exit "$code"
+      - name: Final exact-source and clean-tree audit
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          git diff --exit-code "$SOURCE_SHA"
+          git diff --cached --exit-code "$SOURCE_SHA"
+          git diff --check
+          test -z "$(git ls-files --others --exclude-standard)"
+          printf 'All required validator stages passed on source %s, tree %s. No automatic publication performed.\n' "$SOURCE_SHA" "$SOURCE_TREE" | tee "$OUT/acceptance.txt"
+      - name: Preserve real results and resume identifiers
+        if: always()
+        run: |
+          git status --porcelain=v1 --untracked-files=all > "$OUT/final-status.txt"
+          {
+            echo '## Qwen #12191 packaging verification'
+            echo "Source: $SOURCE_SHA"
+            echo "Parent: $PARENT_SHA"
+            echo "Product tree: $SOURCE_TREE"
+            echo "Workflow commit: $GITHUB_SHA"
+            echo "Run: $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo 'Product PR branch is never written by this read-only validator.'
+            if test -f "$OUT/acceptance.txt"; then cat "$OUT/acceptance.txt"; else echo 'Incomplete or failed verification; inspect failed-step logs. No acceptance.'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qwen-12191-${{ env.SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.OUT }}/*.log
+            ${{ env.OUT }}/*.exit
+            ${{ env.OUT }}/*.txt
+            ${{ env.OUT }}/*.diff
+            ${{ env.OUT }}/*.json
+            ${{ env.OUT }}/*.png
+            ${{ env.OUT }}/document-fixture.html
+          if-no-files-found: warn
+          retention-days: 14
