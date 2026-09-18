@@ -1,0 +1,230 @@
+name: Finalize installer PR 12115 review fixes
+
+on:
+  push:
+    branches:
+      - 'ci/12115-final-*'
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: finalize-installer-pr-12115
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/7002-glibc-preflight
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Sync current upstream main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'dijedontahiri'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          echo "START_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git fetch --no-tags https://github.com/QwenLM/qwen-code.git main
+          echo "SYNCED_UPSTREAM_HEAD=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_ENV"
+          git merge --no-ff -m 'chore: sync upstream main' FETCH_HEAD
+
+      - name: Install repository dependencies
+        shell: bash
+        run: npm ci
+
+      - name: Recover reviewed patch and correct its validation assertion
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/review-artifact"
+          gh run download 35299721391 \
+            --repo dijedontahiri/qwen-code \
+            --name installer-pr-12115-review-validation \
+            --dir "$RUNNER_TEMP/review-artifact"
+          cp "$RUNNER_TEMP/review-artifact/review-fixes.patch" "$RUNNER_TEMP/review-fixes.patch"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path(__import__('os').environ['RUNNER_TEMP']) / 'review-fixes.patch'
+          text = p.read_text()
+          old = "expect(result.stderr).toContain('For a custom runtime, use --archive');"
+          new = "expect(result.stdout).toContain('For a custom runtime, use --archive');"
+          if text.count(old) != 1:
+              raise SystemExit('Expected base-url warning assertion was not found exactly once')
+          p.write_text(text.replace(old, new))
+          PY
+          git apply --check "$RUNNER_TEMP/review-fixes.patch"
+          git apply "$RUNNER_TEMP/review-fixes.patch"
+          npx --no-install prettier --write \
+            scripts/installation/INSTALLATION_GUIDE.md \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js
+          bash -n scripts/installation/install-qwen-standalone.sh
+          git diff --check
+
+      - name: Prove unknown-libc regression fails without GNU identity guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/installation/install-qwen-standalone.sh "$RUNNER_TEMP/installer.good.sh"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/installation/install-qwen-standalone.sh')
+          text = p.read_text()
+          old = '            NR == 1 && /GNU libc|GNU C Library|GLIBC/ {'
+          new = '            NR == 1 {'
+          if text.count(old) != 1:
+              raise SystemExit('GNU identity guard was not found exactly once')
+          p.write_text(text.replace(old, new, 1))
+          PY
+          set +e
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js \
+            -t 'leaves unknown libc with a version on the first line unchanged'
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          cp "$RUNNER_TEMP/installer.good.sh" scripts/installation/install-qwen-standalone.sh
+
+      - name: Prove offline archive regression catches a misplaced preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/installation/install-qwen-standalone.sh "$RUNNER_TEMP/installer.good.sh"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/installation/install-qwen-standalone.sh')
+          text = p.read_text()
+          marker = '    if [[ -n "${ARCHIVE_PATH}" ]]; then\n'
+          mutant = ('    if [[ -n "${ARCHIVE_PATH}" ]]; then\n'
+                    '        mutant_target=$(detect_target 2>/dev/null || true)\n'
+                    '        check_standalone_runtime_compatibility "${mutant_target}" || return 1\n')
+          if text.count(marker) != 1:
+              raise SystemExit('Archive branch marker was not found exactly once')
+          p.write_text(text.replace(marker, mutant, 1))
+          PY
+          set +e
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js \
+            -t 'keeps offline custom archives outside the glibc preflight'
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          cp "$RUNNER_TEMP/installer.good.sh" scripts/installation/install-qwen-standalone.sh
+
+      - name: Prove legacy download tests do not depend on host glibc
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/tests/install-script.test.js "$RUNNER_TEMP/install-script.good.js"
+          mkdir -p "$RUNNER_TEMP/old-glibc-bin"
+          cat > "$RUNNER_TEMP/old-glibc-bin/getconf" <<'SH'
+          #!/usr/bin/env sh
+          if [ "$1" = "GNU_LIBC_VERSION" ]; then
+            echo 'glibc 2.17'
+            exit 0
+          fi
+          exit 1
+          SH
+          chmod +x "$RUNNER_TEMP/old-glibc-bin/getconf"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/tests/install-script.test.js')
+          text = p.read_text()
+          text = text.replace('        writeSupportedGlibcStub(fakeBin);\n', '')
+          text = text.replace('      writeSupportedGlibcStub(fakeBin);\n', '')
+          p.write_text(text)
+          PY
+          set +e
+          PATH="$RUNNER_TEMP/old-glibc-bin:$PATH" \
+            npm run test:scripts -- scripts/tests/install-script.test.js \
+            -t 'resolves Aliyun latest|uses ranged GET fallback'
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          cp "$RUNNER_TEMP/install-script.good.js" scripts/tests/install-script.test.js
+          PATH="$RUNNER_TEMP/old-glibc-bin:$PATH" \
+            npm run test:scripts -- scripts/tests/install-script.test.js \
+            -t 'resolves Aliyun latest|uses ranged GET fallback'
+
+      - name: Run focused installer regression suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js
+          npm run test:scripts -- scripts/tests/install-script.test.js
+          node scripts/lint.js --shellcheck
+          npx --no-install prettier --check \
+            scripts/installation/INSTALLATION_GUIDE.md \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js
+          bash -n scripts/installation/install-qwen-standalone.sh
+          git diff --check
+
+      - name: Audit follow-up scope before preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=$(cat <<'EOF'
+          scripts/installation/INSTALLATION_GUIDE.md
+          scripts/installation/install-qwen-standalone.sh
+          scripts/tests/install-glibc-preflight.test.js
+          scripts/tests/install-script.test.js
+          EOF
+          )
+          actual=$(git diff --name-only | sort)
+          test "$actual" = "$(printf '%s\n' "$expected" | sort)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --stat
+          git diff --check
+
+      - name: Commit reviewed follow-up locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            scripts/installation/INSTALLATION_GUIDE.md \
+            scripts/installation/install-qwen-standalone.sh \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js
+          git commit -m 'fix(installer): address glibc preflight review feedback'
+
+      - name: Run full repository preflight
+        shell: bash
+        run: npm run preflight
+
+      - name: Final self-audit and publication guards
+        shell: bash
+        env:
+          TARGET_BRANCH: fix/7002-glibc-preflight
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          git diff --check HEAD~1 HEAD
+          remote_head=$(git ls-remote https://github.com/dijedontahiri/qwen-code.git "refs/heads/${TARGET_BRANCH}" | cut -f1)
+          test "$remote_head" = "$START_HEAD"
+          echo "Validated candidate: $(git rev-parse HEAD)"
+          echo "Synced upstream at start: $SYNCED_UPSTREAM_HEAD"
+          echo "Current upstream: $(git ls-remote https://github.com/QwenLM/qwen-code.git refs/heads/main | cut -f1)"
+
+      - name: Publish fast-forward to PR branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: fix/7002-glibc-preflight
+        run: |
+          set -euo pipefail
+          git push "https://x-access-token:${GH_TOKEN}@github.com/dijedontahiri/qwen-code.git" \
+            "HEAD:refs/heads/${TARGET_BRANCH}"
