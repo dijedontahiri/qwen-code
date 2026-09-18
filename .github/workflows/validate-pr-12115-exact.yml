@@ -81,3 +81,5 @@ jobs:
           if [[ "${current_upstream}" != "${EXPECTED_BASE}" ]]; then
             echo "NOTICE: upstream main advanced during validation; the tested PR head remains exact, but a later sync check is required."
           fi
+
+# Trigger exact-head validation after the workflow exists on this helper branch.
