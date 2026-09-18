@@ -1,0 +1,54 @@
+name: Compare unchanged Git canary
+on:
+  push:
+    branches: [audit/remaining-pr-blockers-20260918]
+    paths: [.github/workflows/compare-canary-tests.yml]
+permissions:
+  contents: read
+jobs:
+  compare:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: af0421d5d4205a78aabaacff4737d8063fe45b3e
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Install exact-head dependencies and build normally
+        run: |
+          mkdir -p /tmp/evidence
+          test "$(git rev-parse HEAD)" = af0421d5d4205a78aabaacff4737d8063fe45b3e
+          npm ci --no-audit --no-fund > /tmp/evidence/install.log 2>&1 || { tail -n 100 /tmp/evidence/install.log; exit 1; }
+      - name: Run identical canary tests three times on each commit
+        run: |
+          set -euo pipefail
+          git --version | tee /tmp/evidence/git-version.txt
+          git diff --exit-code e596a410bbd58313b6db069eed1cbb33bd3dbd8f af0421d5d4205a78aabaacff4737d8063fe45b3e -- packages/core/src/utils/git-config-exec.canary.test.ts
+          for ref in af0421d5d4205a78aabaacff4737d8063fe45b3e e596a410bbd58313b6db069eed1cbb33bd3dbd8f; do
+            git checkout --detach "$ref"
+            for iteration in 1 2 3; do
+              set +e
+              npm exec --workspace @qwen-code/qwen-code-core -- vitest run src/utils/git-config-exec.canary.test.ts --maxWorkers=1 --retry=0 > "/tmp/evidence/canary-$ref-$iteration.log" 2>&1
+              status=$?
+              set -e
+              echo "$ref iteration=$iteration exit=$status"
+              echo "$status" > "/tmp/evidence/canary-$ref-$iteration-exit.txt"
+              tail -n 45 "/tmp/evidence/canary-$ref-$iteration.log"
+            done
+          done
+          git checkout --detach af0421d5d4205a78aabaacff4737d8063fe45b3e
+          git diff --exit-code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: unchanged-git-canary-comparison
+          path: /tmp/evidence
+          retention-days: 14
+          if-no-files-found: error
