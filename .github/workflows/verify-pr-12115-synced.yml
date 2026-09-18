@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: verify-installer-pr-12115-synced
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   verify:
