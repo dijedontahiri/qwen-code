@@ -1,0 +1,12 @@
+{
+  "phase": "before",
+  "node": "v22.16.0",
+  "directories": 8000,
+  "initialHeapMiB": 71.85313415527344,
+  "retainedHeapMiB": 104.08483123779297,
+  "durationMs": 1217.9436889999997,
+  "result": "Found 1 matching file(s)",
+  "directoryMemos": 4001,
+  "distinctRetainedMatchers": 4001,
+  "patternCacheEntries": 4001
+}

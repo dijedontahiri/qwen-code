@@ -1,0 +1,13 @@
+{
+  "node": "v22.16.0",
+  "platform": "linux/x64",
+  "directories": 12000,
+  "lookups": 24000,
+  "rules": 45,
+  "initialHeapMiB": 7.711204528808594,
+  "retainedHeapMiB": 9.444938659667969,
+  "durationMs": 921.9600250000003,
+  "directoryMemos": 2000,
+  "distinctRetainedMatchers": 1,
+  "patternCacheEntries": 2001
+}

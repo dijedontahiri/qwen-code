@@ -1,0 +1,20 @@
+[
+  {
+    "mutation": "retain-chain-matchers",
+    "exitCode": 1,
+    "failedTests": ["GitIgnoreParser cache retention releases matcher result caches even when every directory lookup is a memo hit"],
+    "caught": true
+  },
+  {
+    "mutation": "skip-memo-hit-counting",
+    "exitCode": 1,
+    "failedTests": ["GitIgnoreParser cache retention releases matcher result caches even when every directory lookup is a memo hit"],
+    "caught": true
+  },
+  {
+    "mutation": "retain-negative-lookups",
+    "exitCode": 1,
+    "failedTests": ["GitIgnoreParser cache retention bounds directory memos and negative pattern lookups across a large scan"],
+    "caught": true
+  }
+]

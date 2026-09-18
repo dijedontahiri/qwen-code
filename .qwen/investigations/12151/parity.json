@@ -1,0 +1,12 @@
+{
+  "seed": 12151,
+  "uniquePaths": 2630,
+  "baselineCurrentAndGitComparisons": 39450,
+  "mismatches": 0,
+  "forcedResetEvery": 7,
+  "orders": [
+    { "order": "forward", "lookups": 13150, "normalDistinctDirectoryMatchers": 5 },
+    { "order": "reverse", "lookups": 13150, "normalDistinctDirectoryMatchers": 5 },
+    { "order": "seeded-shuffle", "lookups": 13150, "normalDistinctDirectoryMatchers": 5 }
+  ]
+}
