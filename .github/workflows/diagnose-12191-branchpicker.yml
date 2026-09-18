@@ -1,0 +1,41 @@
+name: Diagnose PR 12191 BranchPicker failure
+on:
+  push:
+    branches: [diagnostic/12191-branchpicker-baseline-20260918-r9]
+    paths: [.github/workflows/diagnose-12191-branchpicker.yml]
+permissions:
+  contents: read
+jobs:
+  compare:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: pr-parent
+            source: eb48b52da82a60341fd4a3b42a2d7410aa734ad7
+          - label: candidate
+            source: f17370c06965f27d6b82ec14fbae855293f83f93
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out immutable ${{ matrix.label }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.source }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Verify source
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ matrix.source }}"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Run exact failing test file once
+        run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/components/BranchPickerPopover.test.tsx --coverage.enabled=false --retry=0
