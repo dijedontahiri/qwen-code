@@ -53,9 +53,6 @@ jobs:
           legacy = pathlib.Path('scripts/tests/install-script.test.js')
           guide = pathlib.Path('scripts/installation/INSTALLATION_GUIDE.md')
 
-          # Installer: positively identify GNU libc in the ldd fallback, keep the
-          # unknown-libc path factually documented, and make the official-runtime
-          # scope explicit for --base-url mirrors.
           text = installer.read_text()
           detect_start = text.index('detect_glibc_version() {')
           detect_end = text.index('\nglibc_version_at_least() {', detect_start)
@@ -70,11 +67,15 @@ jobs:
           elif new_guard not in detect:
               raise SystemExit('Could not identify ldd fallback guard')
 
-          old_comment = '''        # Do not guess for unknown libc implementations. The archive/runtime
-                  # compatibility check below still handles those hosts as before.'''
-          new_comment = '''        # Unknown libc (musl, busybox ldd): fail open. No libc or runtime check
-                  # runs later either — the archive installs and an incompatible runtime
-                  # fails when qwen first starts, as it did before this preflight.'''
+          old_comment = (
+              '        # Do not guess for unknown libc implementations. The archive/runtime\n'
+              '        # compatibility check below still handles those hosts as before.'
+          )
+          new_comment = (
+              '        # Unknown libc (musl, busybox ldd): fail open. No libc or runtime check\n'
+              '        # runs later either — the archive installs and an incompatible runtime\n'
+              '        # fails when qwen first starts, as it did before this preflight.'
+          )
           if old_comment in text:
               text = text.replace(old_comment, new_comment)
           elif new_comment not in text:
@@ -87,20 +88,15 @@ jobs:
           elif official_error not in text:
               raise SystemExit('Could not find glibc compatibility error')
 
-          mirror_warning = '''    if [[ -n "${BASE_URL}" ]]; then
-                  log_warning "--base-url mirrors are checked against the official standalone runtime requirement. For a custom runtime, use --archive after verifying compatibility with this host."
-              fi'''
+          mirror_warning = (
+              '    if [[ -n "${BASE_URL}" ]]; then\n'
+              '        log_warning "--base-url mirrors are checked against the official standalone runtime requirement. For a custom runtime, use --archive after verifying compatibility with this host."\n'
+              '    fi'
+          )
           if mirror_warning not in text:
-              text = text.replace(
-                  official_error,
-                  official_error + '\n' + mirror_warning,
-              )
+              text = text.replace(official_error, official_error + '\n' + mirror_warning)
           installer.write_text(text)
 
-          # Focused regression harness: make unknown-libc output configurable,
-          # support a private base URL and an offline archive, pin the first-line
-          # parser bug, and replace the brittle source-position assertion with a
-          # behavioral --archive regression.
           text = focused.read_text()
           if "unknownLibcOutput = 'musl libc (x86_64)\\nVersion 1.2.5'" not in text:
               needle = '  useUnknownLibc = false,\n'
@@ -110,7 +106,7 @@ jobs:
                   needle,
                   needle + "  unknownLibcOutput = 'musl libc (x86_64)\\nVersion 1.2.5',\n",
               )
-          if '  baseUrl = \'\',' not in text:
+          if "  baseUrl = ''," not in text:
               needle = "  unknownLibcOutput = 'musl libc (x86_64)\\nVersion 1.2.5',\n"
               text = text.replace(
                   needle,
@@ -204,10 +200,7 @@ jobs:
                   raise SystemExit('Could not insert base-url wording regression')
               text = text.replace(anchor, regression + anchor)
 
-          positional = re.compile(
-              r"\n  it\(\s*'keeps the preflight scoped to downloaded Linux standalone archives',.*?\n  \);\n(?=\}\);)",
-              re.S,
-          )
+          positional_title = 'keeps the preflight scoped to downloaded Linux standalone archives'
           behavioral = '''
             itOnUnix('keeps offline custom archives outside the glibc preflight', () => {
               const result = runInstaller({
@@ -224,10 +217,13 @@ jobs:
               }
             });
           '''
-          if 'keeps the preflight scoped to downloaded Linux standalone archives' in text:
-              text, count = positional.subn(behavioral, text, count=1)
-              if count != 1:
-                  raise SystemExit('Could not replace positional preflight test')
+          if positional_title in text:
+              title_pos = text.index(positional_title)
+              start = text.rfind('\n  it(', 0, title_pos)
+              end = text.find('\n});', title_pos)
+              if start < 0 or end < 0:
+                  raise SystemExit('Could not locate positional preflight test boundaries')
+              text = text[:start] + '\n' + behavioral.strip('\n') + text[end:]
           elif 'keeps offline custom archives outside the glibc preflight' not in text:
               raise SystemExit('Missing preflight scope test')
 
@@ -235,7 +231,6 @@ jobs:
               text = text.replace('  readFileSync,\n', '')
           focused.write_text(text)
 
-          # Existing installer tests must not read the developer host's libc.
           text = legacy.read_text()
           helper = '''function writeSupportedGlibcStub(fakeBin) {
             writeFileSync(
@@ -287,7 +282,6 @@ jobs:
               text = text[:start] + block + text[end:]
           legacy.write_text(text)
 
-          # Keep documentation aligned with the conservative base-url behavior.
           text = guide.read_text()
           overview_anchor = 'blocked by this preflight because custom archives may carry a different runtime.\n'
           overview_extra = (
