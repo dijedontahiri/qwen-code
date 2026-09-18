@@ -1,4 +1,4 @@
-name: Verify issue 12185 document and package boundary
+name: Complete pinned package diagnostics for issue 12185
 
 on:
   push:
@@ -14,12 +14,12 @@ concurrency:
 
 env:
   SOURCE_SHA: f17370c06965f27d6b82ec14fbae855293f83f93
-  PREVIOUS_SHA: 2ab029854f1c9c81d86e8a57e57d98fef92df51d
   PARENT_SHA: eb48b52da82a60341fd4a3b42a2d7410aa734ad7
   SOURCE_TREE: b0ef17e3e0163dab6f8fa77c2975e9dd9c1a5471
+  PREFIX_RUN: '35386880791'
 
 jobs:
-  verify:
+  diagnose:
     if: github.repository == 'dijedontahiri/qwen-code'
     runs-on: ubuntu-latest
     timeout-minutes: 110
@@ -27,243 +27,141 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Checkout immutable product candidate
+      - name: Checkout immutable product source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ env.SOURCE_SHA }}
           fetch-depth: 3
           persist-credentials: false
-      - name: Node 22
+      - name: Use Node 22
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 22.23.2
           cache: npm
-          cache-dependency-path: package-lock.json
-      - name: Record source and inspect isolated environment
+      - name: Record exact source and unchanged SDK inputs
         run: |
           set -euo pipefail
-          OUT="$RUNNER_TEMP/qwen-12191-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          OUT="$RUNNER_TEMP/qwen-12191-completion-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$OUT"
           echo "OUT=$OUT" >> "$GITHUB_ENV"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$(git rev-parse HEAD^)" = "$PREVIOUS_SHA"
-          test "$(git rev-parse HEAD^^)" = "$PARENT_SHA"
           test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          git merge-base --is-ancestor "$PARENT_SHA" "$SOURCE_SHA"
+          git diff --exit-code "$PARENT_SHA" "$SOURCE_SHA" -- packages/sdk-typescript packages/acp-bridge package.json package-lock.json
+          git diff --check "$PARENT_SHA" "$SOURCE_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
-          python3 - <<'PY'
-          import os, subprocess
-          expected = {
-            '.qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md',
-            'packages/web-shell/build-boundary.ts',
-            'packages/web-shell/client/build-boundary.test.ts',
-            'packages/web-shell/vite.lib.config.ts',
-            'packages/web-shell/scripts/verify-package.mjs',
-            'packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx',
-            'packages/web-templates/src/export-html/build.mjs',
-            'packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts',
-          }
-          changed = set(subprocess.check_output(['git','diff','--name-only',os.environ['PARENT_SHA'],os.environ['SOURCE_SHA']], text=True).splitlines())
-          assert changed == expected, (sorted(changed), sorted(expected))
-          print('Exact eight-file repair scope verified; no validation workflow in product diff.')
-          PY
           {
-            printf 'repository=%s\nworkflow_sha=%s\nsource_sha=%s\nparent_sha=%s\nsource_tree=%s\nrun_id=%s\nattempt=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$SOURCE_SHA" "$PARENT_SHA" "$SOURCE_TREE" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
             date -u +%FT%TZ
+            printf 'source=%s\ntree=%s\nparent=%s\nworkflow=%s\nrun=%s\nattempt=%s\nprefix_evidence_run=%s\n' "$SOURCE_SHA" "$SOURCE_TREE" "$PARENT_SHA" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$PREFIX_RUN"
+            echo 'Purpose: isolate a known packed-SDK type failure and execute previously skipped independent checks. Not a transient retry or acceptance bypass.'
+            echo 'Previous exact-source run passed workspace build, 22 focused tests, 9 export guards, effective declaration/export/document negative controls, formatting and affected types/lint.'
+            echo 'SDK and ACP source trees, root manifest and npm lockfile are unchanged from the inspected PR parent. This is not a full baseline preflight comparison.'
             node --version
             npm --version
-            df -h . "$RUNNER_TEMP"
+            df -h .
             free -m
           } | tee "$OUT/provenance.txt"
-          git diff --check "$PARENT_SHA" "$SOURCE_SHA"
-          git diff "$PARENT_SHA" "$SOURCE_SHA" > "$OUT/repair.diff"
-      - name: Install locked dependencies without duplicate prepare build
+      - name: Locked dependency bootstrap
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |
-          set +e
           npm ci --no-audit --progress=false > "$OUT/npm-ci.log" 2>&1
-          code=$?
-          set -e
-          tail -n 35 "$OUT/npm-ci.log"
-          echo "$code" > "$OUT/npm-ci.exit"
-          exit "$code"
-      - name: Require canonical formatting without changing the tested tree
-        run: |
-          files=(
-            packages/web-shell/build-boundary.ts
-            packages/web-shell/client/build-boundary.test.ts
-            packages/web-shell/vite.lib.config.ts
-            packages/web-shell/package.json
-            packages/web-shell/scripts/rewrite-declaration-aliases.mjs
-            packages/web-shell/scripts/verify-package.mjs
-            packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx
-            packages/web-templates/src/export-html/build.mjs
-            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts
-          )
-          if ! npx --no-install prettier --experimental-cli --check "${files[@]}"; then
-            npx --no-install prettier --experimental-cli --write "${files[@]}"
-            git diff > "$OUT/format-correction.diff"
-            cat "$OUT/format-correction.diff"
-            git restore --source="$SOURCE_SHA" --worktree -- "${files[@]}"
-            echo 'Candidate needs a real formatting commit; product validation did not pass.' >&2
-            exit 1
-          fi
-      - name: Build actual workspace prerequisites and document renderer
+      - name: Build source prerequisites and actual export renderer
+        id: build
         run: |
           set +e
           npm run build > "$OUT/build.log" 2>&1
           code=$?
           set -e
-          tail -n 55 "$OUT/build.log"
+          tail -n 50 "$OUT/build.log"
           echo "$code" > "$OUT/build.exit"
           exit "$code"
-      - name: Prove public transcript regression fails against parent implementation
-        run: |
-          python3 - <<'PY'
-          import json, os, pathlib, subprocess
-          root=pathlib.Path.cwd(); out=pathlib.Path(os.environ['OUT'])
-          files=['packages/web-shell/build-boundary.ts','packages/web-shell/vite.lib.config.ts']
-          originals={f:(root/f).read_bytes() for f in files}
-          name='externalizes MCP Apps in the public transcript entry'
-          report=out/'negative-externalization.json'
-          try:
-            for f in files:
-              (root/f).write_bytes(subprocess.check_output(['git','show',os.environ['PARENT_SHA']+':'+f]))
-            cmd=['npm','run','test','--workspace=packages/web-shell','--','client/build-boundary.test.ts','-t',name,'--reporter=json','--outputFile='+str(report)]
-            p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
-            (out/'negative-externalization.log').write_text(p.stdout)
-            print(p.stdout[-6000:])
-            assert p.returncode != 0, 'Negative control unexpectedly passed'
-            data=json.loads(report.read_text())
-            failed=[a for s in data['testResults'] for a in s.get('assertionResults',[]) if a['status']=='failed']
-            assert len(failed)==1 and name in failed[0]['fullName'], failed
-            failures='\n'.join(failed[0].get('failureMessages',[]))
-            assert 'expected false to be true' in failures, failures
-            assert data['numFailedTests']==1 and data.get('numRuntimeErrorTestSuites',0)==0, data
-            print('Negative control failed for the intended externalization assertion only.')
-          finally:
-            for f,b in originals.items(): (root/f).write_bytes(b)
-          subprocess.run(['git','diff','--exit-code',os.environ['SOURCE_SHA'],'--',*files],check=True)
-          PY
-      - name: Positive package and MCP App regressions
-        run: |
-          npm run test --workspace=packages/web-shell -- \
-            client/build-boundary.test.ts \
-            client/components/messages/McpApp.document.dom.test.tsx \
-            client/components/messages/McpApp.dom.test.tsx \
-            client/components/messages/McpApp.test.ts \
-            --reporter=default --reporter=json --outputFile.json="$OUT/focused.json" | tee "$OUT/focused.log"
-      - name: Affected types and lint
-        run: |
-          npm run typecheck --workspace=packages/web-shell > "$OUT/types.log" 2>&1
-          npx --no-install eslint \
-            packages/web-shell/build-boundary.ts \
-            packages/web-shell/client/build-boundary.test.ts \
-            packages/web-shell/vite.lib.config.ts \
-            packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx \
-            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts \
-            --max-warnings 0 > "$OUT/lint.log" 2>&1
-          git diff --check
-      - name: Real declaration and exported-target negative controls
-        run: |
-          python3 - <<'PY'
-          import os,pathlib,subprocess
-          root=pathlib.Path.cwd(); out=pathlib.Path(os.environ['OUT']); package=root/'packages/web-shell'
-          def run(name,args,expected=None):
-            p=subprocess.run(args,cwd=package,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
-            (out/(name+'.log')).write_text(p.stdout)
-            print(name, 'exit',p.returncode,p.stdout[-1800:])
-            if expected is None: assert p.returncode==0, name
-            else: assert p.returncode!=0 and expected in p.stdout, name
-          run('raw-declaration-emit',['npx','--no-install','tsc','-p','tsconfig.lib.json'])
-          try:
-            run('alias-negative',['npm','run','verify:package'],'repository-only @/ import leaked into')
-          finally:
-            run('alias-rewrite',['node','scripts/rewrite-declaration-aliases.mjs'])
-          run('alias-positive',['npm','run','verify:package'])
-          target=package/'dist/transcript.js'; saved=out/'transcript.saved.js'
-          target.rename(saved)
-          try:
-            run('export-target-negative',['npm','run','prepublishOnly'],'missing package export target: ./dist/transcript.js')
-          finally: saved.rename(target)
-          run('export-target-positive',['npm','run','prepublishOnly'])
-          PY
-      - name: Verify unchanged document budget and builder negative control
-        run: |
-          python3 - <<'PY'
-          import json,os,pathlib,re,subprocess
-          root=pathlib.Path.cwd(); out=pathlib.Path(os.environ['OUT'])
-          rel='packages/web-templates/src/export-html/build.mjs'; file=root/rel; fixed=file.read_bytes()
-          def build(name):
-            env=dict(os.environ,EXPORT_HTML_METAFILE=str(out/(name+'.metafile.json')))
-            p=subprocess.run(['node',rel],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
-            (out/(name+'.log')).write_text(p.stdout); print(p.stdout[-5000:]); return p
-          try:
-            file.write_bytes(subprocess.check_output(['git','show',os.environ['PARENT_SHA']+':'+rel]))
-            old=build('document-negative')
-            assert old.returncode!=0, 'Old document builder unexpectedly passed with external MCP dependency'
-            assert re.search(r'Document export renderer JS is \d+ bytes; expected <= 1930000',old.stdout), 'Negative control failed for an unrelated reason'
-          finally: file.write_bytes(fixed)
-          new=build('document-positive'); assert new.returncode==0, 'Candidate renderer failed'
-          meta=json.loads((out/'document-positive.metafile.json').read_text())
-          leaked=[x for x in meta['inputs'] if re.search(r'node_modules/@modelcontextprotocol/(ext-apps|sdk)/',x.replace('\\','/'))]
-          assert not leaked, leaked
-          assert any(x.endswith('document-mcp-app-bridge-stub.ts') for x in meta['inputs']), 'Document stub was not exercised'
-          assert 'const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;' in file.read_text(), 'Budget changed'
-          print('Real document build passed its existing budget and MCP dependency guard.')
-          PY
-          npm run test:scripts -- scripts/tests/transcript-css-entry-filter.test.js scripts/tests/export-html-import-meta-guard.test.js | tee "$OUT/export-guards.log"
-      - name: Pack actual SDK and Web Shell artifacts
+      - name: Pack real SDK and Web Shell and install isolated consumer
+        id: install
         run: |
           npm pack --workspace=packages/sdk-typescript --pack-destination "$OUT" --json > "$OUT/sdk-pack.log" 2>&1
           npm pack --workspace=packages/web-shell --pack-destination "$OUT" --json > "$OUT/web-shell-pack.log" 2>&1
           python3 - <<'PY'
-          import json,os,pathlib,tarfile
-          out=pathlib.Path(os.environ['OUT'])
+          import json,os,pathlib,subprocess,tarfile
+          out=pathlib.Path(os.environ['OUT']); consumer=out/'consumer'; consumer.mkdir()
           shells=list(out.glob('qwen-code-web-shell-*.tgz')); sdks=list(out.glob('qwen-code-sdk-*.tgz'))
-          assert len(shells)==1 and len(sdks)==1, (shells,sdks)
+          assert len(shells)==1 and len(sdks)==1
           with tarfile.open(shells[0]) as archive:
-            names=set(archive.getnames()); pkg=json.load(archive.extractfile('package/package.json'))
+            pkg=json.load(archive.extractfile('package/package.json')); names=set(archive.getnames())
             targets=[v for export in pkg['exports'].values() for v in export.values()]
             assert len(targets)==6
             for target in targets: assert 'package/'+target.removeprefix('./') in names, target
-            assert not any('document-mcp-app-bridge-stub' in n or '/document-export/' in n for n in names)
-            print('Six real tarball export targets exist; no document-only stub in published package.')
-          consumer=out/'consumer'; consumer.mkdir()
-          (out/'consumer-artifacts.json').write_text(json.dumps({'webShell':shells[0].name,'sdk':sdks[0].name}))
+            assert not any('document-mcp-app-bridge-stub' in n for n in names)
           def installed(name):
-            import subprocess
             return subprocess.check_output(['node','-p',f"require({json.dumps(name+'/package.json')}).version"],text=True).strip()
           deps={name:installed(name) for name in ['react','react-dom','@types/react','@types/react-dom','typescript']}
           deps.update({'@qwen-code/web-shell':'file:'+str(shells[0]),'@qwen-code/sdk':'file:'+str(sdks[0])})
-          (consumer/'package.json').write_text(json.dumps({'name':'qwen-12185-external-consumer','private':True,'type':'module','dependencies':deps}))
-          (consumer/'consumer.ts').write_text("import * as shell from '@qwen-code/web-shell';\nimport * as transcript from '@qwen-code/web-shell/transcript';\nimport * as daemon from '@qwen-code/web-shell/daemon-react-sdk';\nconsole.log(Object.keys(shell),Object.keys(transcript),Object.keys(daemon));\n")
-          (consumer/'tsconfig.json').write_text(json.dumps({'compilerOptions':{'target':'ES2022','module':'ESNext','moduleResolution':'Bundler','lib':['ES2022','DOM','DOM.Iterable'],'strict':True,'skipLibCheck':False,'noEmit':True},'include':['consumer.ts']}))
-          (consumer/'resolve.mjs').write_text("import { existsSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nfor (const name of ['@qwen-code/web-shell','@qwen-code/web-shell/transcript','@qwen-code/web-shell/daemon-react-sdk']) { const url=import.meta.resolve(name); if (!existsSync(fileURLToPath(url))) throw new Error('Missing export '+name); console.log(name,url); }\n")
+          (consumer/'package.json').write_text(json.dumps({'name':'isolated-package-boundary-consumer','private':True,'type':'module','dependencies':deps}))
+          (consumer/'consumer.ts').write_text("import * as root from '@qwen-code/web-shell';\nimport * as transcript from '@qwen-code/web-shell/transcript';\nimport * as daemon from '@qwen-code/web-shell/daemon-react-sdk';\nconsole.log(root,transcript,daemon);\n")
+          (consumer/'sdk-only.ts').write_text("import * as daemon from '@qwen-code/sdk/daemon';\nconsole.log(daemon);\n")
+          options={'target':'ES2022','module':'ESNext','moduleResolution':'Bundler','lib':['ES2022','DOM','DOM.Iterable'],'strict':True,'skipLibCheck':False,'noEmit':True}
+          for name in ['consumer','sdk-only']:
+            (consumer/(name+'.json')).write_text(json.dumps({'compilerOptions':options,'include':[name+'.ts']}))
+          (consumer/'resolve.mjs').write_text("import {existsSync} from 'node:fs'; import {fileURLToPath} from 'node:url'; for (const name of ['@qwen-code/web-shell','@qwen-code/web-shell/transcript','@qwen-code/web-shell/daemon-react-sdk']) { const url=import.meta.resolve(name); if (!existsSync(fileURLToPath(url))) throw new Error(name); console.log(name,url); }\n")
+          (out/'consumer-manifest.json').write_text((consumer/'package.json').read_text())
           PY
           (cd "$OUT/consumer" && npm install --no-audit --progress=false) > "$OUT/consumer-install.log" 2>&1
-          node "$OUT/consumer/node_modules/typescript/bin/tsc" -p "$OUT/consumer/tsconfig.json" > "$OUT/consumer-types.log" 2>&1
+      - name: Isolate SDK-only declaration failure without importing Web Shell
+        id: sdk_diagnosis
+        run: |
+          python3 - <<'PY'
+          import json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['OUT']); consumer=out/'consumer'
+          args=['node',str(consumer/'node_modules/typescript/bin/tsc'),'-p',str(consumer/'sdk-only.json')]
+          p=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
+          (out/'sdk-only-types.log').write_text(p.stdout); print(p.stdout)
+          expected=["Cannot find module '@qwen-code/acp-bridge/daemonEventTypes'", "Cannot find module '../types/permission-mode.js'"]
+          assert p.returncode!=0 and all(x in p.stdout for x in expected), 'Expected SDK-only baseline signature was not established'
+          errors=[line for line in p.stdout.splitlines() if 'error TS' in line]
+          assert len(errors)==2 and all('error TS2307:' in line for line in errors), errors
+          assert all('@qwen-code/sdk/dist/daemon/' in line for line in errors), errors
+          result={'source':os.environ['SOURCE_SHA'],'sdkInputsUnchangedFrom':os.environ['PARENT_SHA'],'sdkOnlyExit':p.returncode,'errors':errors,'meaning':'Confirmed packaging blocker, NOT a positive consumer pass'}
+          (out/'sdk-baseline-diagnosis.json').write_text(json.dumps(result,indent=2))
+          print('SDK-only import reproduces both missing declarations without any Web Shell import. Positive package acceptance remains blocked.')
+          PY
+      - name: Strict packed Web Shell consumer type check
+        id: consumer
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          set +e
+          node "$OUT/consumer/node_modules/typescript/bin/tsc" -p "$OUT/consumer/consumer.json" > "$OUT/consumer-types.log" 2>&1
+          code=$?
+          set -e
+          cat "$OUT/consumer-types.log"
+          echo "$code" > "$OUT/consumer-types.exit"
+          exit "$code"
+      - name: Independently verify packed runtime exports and symlink consumers
+        id: runtime
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
           node "$OUT/consumer/resolve.mjs" | tee "$OUT/consumer-resolution.log"
           ln -s "$OUT/consumer" "$OUT/consumer-link"
           node --preserve-symlinks --preserve-symlinks-main "$OUT/consumer-link/resolve.mjs" | tee "$OUT/consumer-symlink-resolution.log"
           node --input-type=module <<'JS'
-          import { build } from 'esbuild';
-          import { writeFile } from 'node:fs/promises';
-          import { join } from 'node:path';
+          import {build} from 'esbuild';
+          import {writeFile} from 'node:fs/promises';
+          import {join} from 'node:path';
           for (const link of [false,true]) {
             const result=await build({absWorkingDir:join(process.env.OUT,link?'consumer-link':'consumer'),entryPoints:['consumer.ts'],bundle:true,write:false,platform:'browser',format:'esm',preserveSymlinks:link,metafile:true,define:{'process.env.NODE_ENV':'"production"'}});
             await writeFile(join(process.env.OUT,link?'consumer-symlink.metafile.json':'consumer.metafile.json'),JSON.stringify(result.metafile));
-            console.log('Packed browser consumer built:',link?'symlink':'normal',Object.keys(result.metafile.inputs).length,'inputs');
+            console.log('Real packed consumer browser bundle:',link?'symlink':'normal',Object.keys(result.metafile.inputs).length,'inputs');
           }
           JS
-      - name: Render genuine exported MCP fallback in Chromium
+      - name: Render actual exported MCP fallback in Chromium
+        id: browser
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           npx --no-install playwright install chromium > "$OUT/chromium-install.log" 2>&1
           node --input-type=module <<'JS'
-          import { chromium } from 'playwright';
-          import { readFile,writeFile } from 'node:fs/promises';
-          import { createServer } from 'node:http';
-          import { join } from 'node:path';
+          import {chromium} from 'playwright';
+          import {readFile,writeFile} from 'node:fs/promises';
+          import {createServer} from 'node:http';
+          import {join} from 'node:path';
           import assert from 'node:assert/strict';
           const dir='packages/web-templates/src/export-html/dist';
           let html=await readFile(join(dir,'document.html'),'utf8');
@@ -276,16 +174,16 @@ jobs:
           const blocks=[{...common,id:'question',kind:'user',text:'Show the recorded MCP result.'},{...common,id:'tool',kind:'tool',toolCallId:'fixture-call',toolName:'mcp__fixture__demo',title:'MCP fixture',status:'completed',preview:{kind:'mcp_invocation',serverId:'fixture',toolName:'demo'},rawOutput:display},{...common,id:'answer',kind:'assistant',text:'The recorded result is shown above.'}];
           const envelope={schemaVersion:1,rendererVersion:version,blocks,metadata:{title:'MCP export boundary verification',exportedAt:new Date().toISOString(),complete:true,truncated:false}};
           html=html.replaceAll('__EXPORT_NONCE__','qwen-validation-12191');
-          const envelopePattern=/(<script\b[^>]*\bid="transcript-document"[^>]*>)[\s\S]*?(<\/script>)/;
-          assert(envelopePattern.test(html),'Missing document envelope element');
-          html=html.replace(envelopePattern,(_,a,b)=>a+JSON.stringify(envelope).replaceAll('<','\\u003c')+b);
+          const pattern=/(<script\b[^>]*\bid="transcript-document"[^>]*>)[\s\S]*?(<\/script>)/;
+          assert(pattern.test(html),'Missing document envelope element');
+          html=html.replace(pattern,(_,a,b)=>a+JSON.stringify(envelope).replaceAll('<','\\u003c')+b);
           await writeFile(join(process.env.OUT,'document-fixture.html'),html);
           const server=createServer((req,res)=>{if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end(html);}else{res.writeHead(404);res.end();}});
           await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
           const browser=await chromium.launch();
+          const page=await browser.newPage({viewport:{width:1280,height:900}});
+          const errors=[],unexpected=[];
           try {
-            const page=await browser.newPage({viewport:{width:1280,height:900}});
-            const errors=[],unexpected=[];
             page.on('pageerror',error=>errors.push(error.message));
             const origin='http://127.0.0.1:'+server.address().port;
             await page.route('**/*',async route=>{
@@ -299,12 +197,17 @@ jobs:
             await page.getByText('Recorded MCP fixture result',{exact:true}).waitFor({state:'visible',timeout:15000});
             assert.equal(await page.locator('iframe').count(),0);
             assert.deepEqual(errors,[]); assert.deepEqual(unexpected,[]);
-            await page.screenshot({path:join(process.env.OUT,'document-mcp-fallback.png'),fullPage:true});
             await writeFile(join(process.env.OUT,'browser-result.json'),JSON.stringify({source:process.env.SOURCE_SHA,errors,unexpected,iframeCount:0,recordedFallbackVisible:true}));
-            console.log('Actual document renderer displayed the recorded MCP fallback without iframe, daemon requests, or page errors.');
-          } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}
+            console.log('Real document rendered recorded MCP fallback with zero iframes, daemon requests, and page errors.');
+          } finally {
+            await page.screenshot({path:join(process.env.OUT,'document-mcp-fallback.png'),fullPage:true});
+            await writeFile(join(process.env.OUT,'browser-diagnostics.json'),JSON.stringify({errors,unexpected,body:await page.locator('body').innerText()}));
+            await browser.close();await new Promise(resolve=>server.close(resolve));
+          }
           JS
-      - name: Full repository preflight
+      - name: Full repository preflight (independent, failures remain failures)
+        id: preflight
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           set +e
           npm run preflight > "$OUT/preflight.log" 2>&1
@@ -313,7 +216,9 @@ jobs:
           tail -n 100 "$OUT/preflight.log"
           echo "$code" > "$OUT/preflight.exit"
           exit "$code"
-      - name: Final exact-source and clean-tree audit
+      - name: Exact source and clean worktree audit
+        id: audit
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
@@ -321,33 +226,33 @@ jobs:
           git diff --cached --exit-code "$SOURCE_SHA"
           git diff --check
           test -z "$(git ls-files --others --exclude-standard)"
-          printf 'All required validator stages passed on source %s, tree %s. No automatic publication performed.\n' "$SOURCE_SHA" "$SOURCE_TREE" | tee "$OUT/acceptance.txt"
-      - name: Preserve real results and resume identifiers
+      - name: Save true outcomes and handover
         if: always()
+        env:
+          STEP_OUTCOMES: ${{ toJSON(steps) }}
         run: |
+          printf '%s\n' "$STEP_OUTCOMES" > "$OUT/step-outcomes.json"
           git status --porcelain=v1 --untracked-files=all > "$OUT/final-status.txt"
           {
-            echo '## Qwen #12191 packaging verification'
-            echo "Source: $SOURCE_SHA"
-            echo "Parent: $PARENT_SHA"
-            echo "Product tree: $SOURCE_TREE"
-            echo "Workflow commit: $GITHUB_SHA"
-            echo "Run: $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
-            echo 'Product PR branch is never written by this read-only validator.'
-            if test -f "$OUT/acceptance.txt"; then cat "$OUT/acceptance.txt"; else echo 'Incomplete or failed verification; inspect failed-step logs. No acceptance.'; fi
+            echo '## Issue 12185 verification completion'
+            echo "Immutable product source: $SOURCE_SHA"
+            echo "Tree: $SOURCE_TREE"
+            echo "Previous same-source prefix evidence: run $PREFIX_RUN"
+            echo "This run: $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT; workflow $GITHUB_SHA"
+            echo 'The strict consumer step is not suppressed. Independent browser/runtime/preflight steps run after a consumer failure, but that failure keeps the job red.'
+            echo 'No auto-publication. Product branch remains unchanged. SDK-only diagnostic reproduction is not product acceptance.'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload evidence
+      - name: Preserve logs and genuine screenshots
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: qwen-12191-${{ env.SOURCE_SHA }}-${{ github.run_attempt }}
+          name: qwen-12191-completion-${{ env.SOURCE_SHA }}-${{ github.run_attempt }}
           path: |
             ${{ env.OUT }}/*.log
             ${{ env.OUT }}/*.exit
             ${{ env.OUT }}/*.txt
-            ${{ env.OUT }}/*.diff
             ${{ env.OUT }}/*.json
             ${{ env.OUT }}/*.png
             ${{ env.OUT }}/document-fixture.html
-          if-no-files-found: warn
           retention-days: 14
+          if-no-files-found: warn
