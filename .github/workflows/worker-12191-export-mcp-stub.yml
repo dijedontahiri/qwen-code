@@ -13,9 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_SHA: 2ab029854f1c9c81d86e8a57e57d98fef92df51d
+  SOURCE_SHA: f17370c06965f27d6b82ec14fbae855293f83f93
+  PREVIOUS_SHA: 2ab029854f1c9c81d86e8a57e57d98fef92df51d
   PARENT_SHA: eb48b52da82a60341fd4a3b42a2d7410aa734ad7
-  SOURCE_TREE: f68a972ca09c8764d2cbf31bfffce33a95e4d44c
+  SOURCE_TREE: b0ef17e3e0163dab6f8fa77c2975e9dd9c1a5471
 
 jobs:
   verify:
@@ -30,7 +31,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ env.SOURCE_SHA }}
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
       - name: Node 22
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
@@ -45,7 +46,8 @@ jobs:
           mkdir -p "$OUT"
           echo "OUT=$OUT" >> "$GITHUB_ENV"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$(git rev-parse HEAD^)" = "$PARENT_SHA"
+          test "$(git rev-parse HEAD^)" = "$PREVIOUS_SHA"
+          test "$(git rev-parse HEAD^^)" = "$PARENT_SHA"
           test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           python3 - <<'PY'
@@ -55,13 +57,14 @@ jobs:
             'packages/web-shell/build-boundary.ts',
             'packages/web-shell/client/build-boundary.test.ts',
             'packages/web-shell/vite.lib.config.ts',
+            'packages/web-shell/scripts/verify-package.mjs',
             'packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx',
             'packages/web-templates/src/export-html/build.mjs',
             'packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts',
           }
           changed = set(subprocess.check_output(['git','diff','--name-only',os.environ['PARENT_SHA'],os.environ['SOURCE_SHA']], text=True).splitlines())
           assert changed == expected, (sorted(changed), sorted(expected))
-          print('Exact seven-file repair scope verified; no validation workflow in product diff.')
+          print('Exact eight-file repair scope verified; no validation workflow in product diff.')
           PY
           {
             printf 'repository=%s\nworkflow_sha=%s\nsource_sha=%s\nparent_sha=%s\nsource_tree=%s\nrun_id=%s\nattempt=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$SOURCE_SHA" "$PARENT_SHA" "$SOURCE_TREE" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
@@ -227,6 +230,7 @@ jobs:
             assert not any('document-mcp-app-bridge-stub' in n or '/document-export/' in n for n in names)
             print('Six real tarball export targets exist; no document-only stub in published package.')
           consumer=out/'consumer'; consumer.mkdir()
+          (out/'consumer-artifacts.json').write_text(json.dumps({'webShell':shells[0].name,'sdk':sdks[0].name}))
           def installed(name):
             import subprocess
             return subprocess.check_output(['node','-p',f"require({json.dumps(name+'/package.json')}).version"],text=True).strip()
