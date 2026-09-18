@@ -1,4 +1,4 @@
-name: Verify installer PR 12115 synced
+name: Verify installer PR 12115 review fixes
 
 on:
   push:
@@ -16,60 +16,148 @@ jobs:
   verify:
     if: github.repository == 'dijedontahiri/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 180
     permissions:
       contents: write
-    env:
-      EXPECTED_HEAD: 4c0765f6618ebe48976356e579d64afd8321f6b2
-      EXPECTED_BASE: 3987391392611e5d1f66851681f13ee7e55f4864
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4c0765f6618ebe48976356e579d64afd8321f6b2
+          ref: fix/7002-glibc-preflight
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - name: Sync candidate to current upstream main
+      - name: Capture branch head and sync current upstream main
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'dijedontahiri'
           git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          echo "START_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git fetch --no-tags https://github.com/QwenLM/qwen-code.git main
-          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_BASE"
+          echo "UPSTREAM_HEAD=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_ENV"
           git merge --no-ff -m 'chore: sync upstream main' FETCH_HEAD
-      - name: Prepare bounded review follow-up
+      - name: Prepare complete review follow-up
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/installer-validation"
-          cat > "$RUNNER_TEMP/installer-validation/follow-up.py" <<'PY'
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/installer-review-validation"
+          cat > "$RUNNER_TEMP/installer-review-validation/apply-review-fixes.py" <<'PY'
           import pathlib
-          import subprocess
-          import sys
+          import re
 
           installer = pathlib.Path('scripts/installation/install-qwen-standalone.sh')
-          test = pathlib.Path('scripts/tests/install-glibc-preflight.test.js')
-          mode = sys.argv[1]
-          if mode == 'test':
-              for path, expected in [
-                  (installer, 'fca9bd26fe499589edc90da760c3ba958997074c'),
-                  (test, '6f07a08dd363ae256f0c4414d7660115b6341116'),
-              ]:
-                  actual = subprocess.check_output(['git', 'hash-object', str(path)], text=True).strip()
-                  if actual != expected:
-                      raise SystemExit(f'Unexpected source blob for {path}: {actual}')
-              source = test.read_text()
-              old = '  useUnknownLibc = false,\n'
-              new = old + "  unknownLibcOutput = 'musl libc (x86_64)\\nVersion 1.2.5',\n"
-              assert source.count(old) == 1
-              source = source.replace(old, new)
+          focused = pathlib.Path('scripts/tests/install-glibc-preflight.test.js')
+          legacy = pathlib.Path('scripts/tests/install-script.test.js')
+          guide = pathlib.Path('scripts/installation/INSTALLATION_GUIDE.md')
+
+          # Installer: positively identify GNU libc in the ldd fallback, keep the
+          # unknown-libc path factually documented, and make the official-runtime
+          # scope explicit for --base-url mirrors.
+          text = installer.read_text()
+          detect_start = text.index('detect_glibc_version() {')
+          detect_end = text.index('\nglibc_version_at_least() {', detect_start)
+          detect = text[detect_start:detect_end]
+          old_guard = '            NR == 1 {'
+          new_guard = '            NR == 1 && /GNU libc|GNU C Library|GLIBC/ {'
+          if old_guard in detect:
+              if detect.count(old_guard) != 1:
+                  raise SystemExit('Unexpected number of ldd first-line guards')
+              detect = detect.replace(old_guard, new_guard)
+              text = text[:detect_start] + detect + text[detect_end:]
+          elif new_guard not in detect:
+              raise SystemExit('Could not identify ldd fallback guard')
+
+          old_comment = '''        # Do not guess for unknown libc implementations. The archive/runtime
+                  # compatibility check below still handles those hosts as before.'''
+          new_comment = '''        # Unknown libc (musl, busybox ldd): fail open. No libc or runtime check
+                  # runs later either — the archive installs and an incompatible runtime
+                  # fails when qwen first starts, as it did before this preflight.'''
+          if old_comment in text:
+              text = text.replace(old_comment, new_comment)
+          elif new_comment not in text:
+              raise SystemExit('Could not find unknown-libc compatibility comment')
+
+          generic_error = '    log_error "The standalone Linux archive bundles Node.js 22 and requires glibc 2.28 or newer; this system has glibc ${glibc_version}."'
+          official_error = '    log_error "The official standalone Linux archive bundles Node.js 22 and requires glibc 2.28 or newer; this system has glibc ${glibc_version}."'
+          if generic_error in text:
+              text = text.replace(generic_error, official_error)
+          elif official_error not in text:
+              raise SystemExit('Could not find glibc compatibility error')
+
+          mirror_warning = '''    if [[ -n "${BASE_URL}" ]]; then
+                  log_warning "--base-url mirrors are checked against the official standalone runtime requirement. For a custom runtime, use --archive after verifying compatibility with this host."
+              fi'''
+          if mirror_warning not in text:
+              text = text.replace(
+                  official_error,
+                  official_error + '\n' + mirror_warning,
+              )
+          installer.write_text(text)
+
+          # Focused regression harness: make unknown-libc output configurable,
+          # support a private base URL and an offline archive, pin the first-line
+          # parser bug, and replace the brittle source-position assertion with a
+          # behavioral --archive regression.
+          text = focused.read_text()
+          if "unknownLibcOutput = 'musl libc (x86_64)\\nVersion 1.2.5'" not in text:
+              needle = '  useUnknownLibc = false,\n'
+              if text.count(needle) != 1:
+                  raise SystemExit('Could not extend unknown-libc harness')
+              text = text.replace(
+                  needle,
+                  needle + "  unknownLibcOutput = 'musl libc (x86_64)\\nVersion 1.2.5',\n",
+              )
+          if '  baseUrl = \'\',' not in text:
+              needle = "  unknownLibcOutput = 'musl libc (x86_64)\\nVersion 1.2.5',\n"
+              text = text.replace(
+                  needle,
+                  needle + "  baseUrl = '',\n  useLocalArchive = false,\n",
+              )
+          if "cat <<'QWEN_TEST_LIBC'" not in text:
               old = 'echo "musl libc (x86_64)"\necho "Version 1.2.5"'
               new = "cat <<'QWEN_TEST_LIBC'\n${unknownLibcOutput}\nQWEN_TEST_LIBC"
-              assert source.count(old) == 1
-              source = source.replace(old, new)
+              if text.count(old) != 1:
+                  raise SystemExit('Could not make ldd output configurable')
+              text = text.replace(old, new)
+
+          if 'const installerArgs = [' not in text:
+              pattern = re.compile(
+                  r"  const result = spawnSync\(\n    'bash',\n    \[\n.*?    \],\n    \{\n",
+                  re.S,
+              )
+              replacement = '''  const installerArgs = [
+              installerPath,
+              '--method',
+              'standalone',
+              '--mirror',
+              'github',
+              '--version',
+              '0.24.0',
+              '--no-modify-path',
+            ];
+            if (baseUrl) {
+              installerArgs.push('--base-url', baseUrl);
+            }
+            if (useLocalArchive) {
+              const archivePath = path.join(root, 'qwen-code-linux-x64.tar.gz');
+              writeFileSync(archivePath, 'placeholder archive');
+              installerArgs.push('--archive', archivePath);
+            }
+
+            const result = spawnSync(
+              'bash',
+              installerArgs,
+              {
+          '''
+              text, count = pattern.subn(replacement, text, count=1)
+              if count != 1:
+                  raise SystemExit('Could not replace installer argument array')
+
+          unknown_title = 'leaves unknown libc with a version on the first line unchanged'
+          if unknown_title not in text:
               anchor = "  itOnUnix('allows glibc 2.28 to continue to the release download', () => {"
               regression = '''  itOnUnix('leaves unknown libc with a version on the first line unchanged', () => {
               const result = runInstaller({
@@ -88,62 +176,208 @@ jobs:
             });
 
           '''
-              assert source.count(anchor) == 1
-              test.write_text(source.replace(anchor, regression + anchor))
-          elif mode == 'fix':
-              source = installer.read_text()
-              start = source.index('detect_glibc_version() {')
-              end = source.index('\nglibc_version_at_least() {', start)
-              original = source[start:end]
-              old = '            NR == 1 {'
-              new = '            NR == 1 && /GNU libc|GNU C Library|GLIBC/ {'
-              assert original.count(old) == 1
-              installer.write_text(source[:start] + original.replace(old, new) + source[end:])
-          else:
-              raise SystemExit('Unknown mode')
+              if text.count(anchor) != 1:
+                  raise SystemExit('Could not insert first-line unknown-libc regression')
+              text = text.replace(anchor, regression + anchor)
+
+          base_url_title = 'identifies the official runtime requirement for base-url mirrors'
+          if base_url_title not in text:
+              anchor = "  itOnUnix('falls back to ldd when getconf cannot report glibc', () => {"
+              regression = '''  itOnUnix('identifies the official runtime requirement for base-url mirrors', () => {
+              const result = runInstaller({
+                glibcVersion: '2.17',
+                baseUrl: 'https://mirror.invalid/qwen',
+              });
+              try {
+                expect(result.status).toBe(1);
+                expect(result.stderr).toContain('The official standalone Linux archive');
+                expect(result.stderr).not.toContain('The standalone Linux archive bundles');
+                expect(result.stderr).toContain('For a custom runtime, use --archive');
+                expect(existsSync(result.curlMarker)).toBe(false);
+              } finally {
+                cleanup(result);
+              }
+            });
+
+          '''
+              if text.count(anchor) != 1:
+                  raise SystemExit('Could not insert base-url wording regression')
+              text = text.replace(anchor, regression + anchor)
+
+          positional = re.compile(
+              r"\n  it\(\s*'keeps the preflight scoped to downloaded Linux standalone archives',.*?\n  \);\n(?=\}\);)",
+              re.S,
+          )
+          behavioral = '''
+            itOnUnix('keeps offline custom archives outside the glibc preflight', () => {
+              const result = runInstaller({
+                glibcVersion: '2.17',
+                useLocalArchive: true,
+              });
+              try {
+                expect(result.status).toBe(1);
+                expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
+                expect(result.stderr).toContain('SHA256SUMS not found');
+                expect(existsSync(result.curlMarker)).toBe(false);
+              } finally {
+                cleanup(result);
+              }
+            });
+          '''
+          if 'keeps the preflight scoped to downloaded Linux standalone archives' in text:
+              text, count = positional.subn(behavioral, text, count=1)
+              if count != 1:
+                  raise SystemExit('Could not replace positional preflight test')
+          elif 'keeps offline custom archives outside the glibc preflight' not in text:
+              raise SystemExit('Missing preflight scope test')
+
+          if 'readFileSync,' in text and 'readFileSync(' not in text.replace('readFileSync,', ''):
+              text = text.replace('  readFileSync,\n', '')
+          focused.write_text(text)
+
+          # Existing installer tests must not read the developer host's libc.
+          text = legacy.read_text()
+          helper = '''function writeSupportedGlibcStub(fakeBin) {
+            writeFileSync(
+              path.join(fakeBin, 'getconf'),
+              [
+                '#!/usr/bin/env sh',
+                'if [ "$1" = "GNU_LIBC_VERSION" ]; then echo "glibc 2.39"; exit 0; fi',
+                'exit 1',
+                '',
+              ].join('\\n'),
+            );
+            chmodSync(path.join(fakeBin, 'getconf'), 0o755);
+          }
+
+          '''
+          if 'function writeSupportedGlibcStub(fakeBin)' not in text:
+              marker = "describe('installation scripts', () => {"
+              if text.count(marker) != 1:
+                  raise SystemExit('Could not insert supported-glibc test helper')
+              text = text.replace(marker, helper + marker)
+
+          names = [
+              'resolves Aliyun latest through a single VERSION pointer before downloading archives',
+              'tries GitHub before npm when auto-selected Aliyun archive is unavailable',
+              'uses ranged GET fallback when archive HEAD probes fail',
+              'falls back to npm in detect mode when archive is unavailable',
+              'passes pinned versions through to npm fallback',
+              'preserves context when npm fallback also fails',
+          ]
+          for name in names:
+              title = text.find(name)
+              if title < 0:
+                  raise SystemExit(f'Could not find installer test: {name}')
+              start = text.rfind('\n  it', 0, title)
+              end = text.find('\n  it', title + len(name))
+              if end < 0:
+                  end = text.find('\n});', title + len(name))
+              block = text[start:end]
+              if 'writeSupportedGlibcStub(fakeBin);' in block:
+                  continue
+              pattern = re.compile(r'(?m)^([ \t]*)mkdirSync\(fakeBin, \{ recursive: true \}\);$')
+              block, count = pattern.subn(
+                  lambda match: match.group(0) + '\n' + match.group(1) + 'writeSupportedGlibcStub(fakeBin);',
+                  block,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit(f'Could not add libc stub to installer test: {name}')
+              text = text[:start] + block + text[end:]
+          legacy.write_text(text)
+
+          # Keep documentation aligned with the conservative base-url behavior.
+          text = guide.read_text()
+          overview_anchor = 'blocked by this preflight because custom archives may carry a different runtime.\n'
+          overview_extra = (
+              'Mirrored downloads selected with `--base-url` remain subject to the official\n'
+              'runtime preflight. For a custom runtime build, verify host compatibility and\n'
+              'install it with `--archive`.\n'
+          )
+          if overview_extra not in text:
+              if text.count(overview_anchor) != 1:
+                  raise SystemExit('Could not update glibc overview documentation')
+              text = text.replace(overview_anchor, overview_anchor + overview_extra)
+
+          mirrors_old = '''Use `--base-url` for private mirrors. The URL must contain
+          `qwen-code-<target>` archives and `SHA256SUMS` in the same directory. Custom
+          base URLs must use `https://`.'''
+          mirrors_new = '''Use `--base-url` for private mirrors of the official standalone layout. The URL
+          must contain `qwen-code-<target>` archives and `SHA256SUMS` in the same directory.
+          These mirrored downloads remain subject to the official Linux runtime preflight.
+          Custom base URLs must use `https://`. If the mirror serves a custom runtime build,
+          verify its host compatibility separately and install it with `--archive`.'''
+          if mirrors_old in text:
+              text = text.replace(mirrors_old, mirrors_new)
+          elif mirrors_new not in text:
+              raise SystemExit('Could not clarify base-url mirror documentation')
+          guide.write_text(text)
           PY
       - name: Install repository dependencies
         shell: bash
         run: |
           set -o pipefail
-          npm ci 2>&1 | tee "$RUNNER_TEMP/installer-validation/npm-ci.log"
-      - name: Prove regression fails before fix
+          npm ci 2>&1 | tee "$RUNNER_TEMP/installer-review-validation/npm-ci.log"
+      - name: Apply review fixes and format
         shell: bash
         run: |
-          python3 "$RUNNER_TEMP/installer-validation/follow-up.py" test
-          set +e
-          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js -t 'leaves unknown libc with a version on the first line unchanged' > "$RUNNER_TEMP/installer-validation/before.log" 2>&1
-          result=$?
-          set -e
-          cat "$RUNNER_TEMP/installer-validation/before.log"
-          test "$result" -eq 1
-          grep -F 'leaves unknown libc with a version on the first line unchanged' "$RUNNER_TEMP/installer-validation/before.log"
-          grep -F 'AssertionError' "$RUNNER_TEMP/installer-validation/before.log"
-          grep -F 'requires glibc 2.28 or newer' "$RUNNER_TEMP/installer-validation/before.log"
-      - name: Apply narrow fix and format
-        shell: bash
-        run: |
-          python3 "$RUNNER_TEMP/installer-validation/follow-up.py" fix
-          npx --no-install prettier --write scripts/tests/install-glibc-preflight.test.js
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/installer-review-validation/apply-review-fixes.py"
+          npx --no-install prettier --write \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js \
+            scripts/installation/INSTALLATION_GUIDE.md
           bash -n scripts/installation/install-qwen-standalone.sh
           git diff --check
-          git diff > "$RUNNER_TEMP/installer-validation/review-follow-up.patch"
-      - name: Run focused regression suite
+          git diff > "$RUNNER_TEMP/installer-review-validation/review-fixes.patch"
+      - name: Prove offline-archive regression catches a misplaced guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/installation/install-qwen-standalone.sh "$RUNNER_TEMP/installer-review-validation/installer.good.sh"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/installation/install-qwen-standalone.sh')
+          text = path.read_text()
+          marker = '    if [[ -n "${ARCHIVE_PATH}" ]]; then\n'
+          mutant = '''    if [[ -n "${ARCHIVE_PATH}" ]]; then
+              mutant_target=$(detect_target 2>/dev/null || true)
+              check_standalone_runtime_compatibility "${mutant_target}" || return 1
+          '''
+          if text.count(marker) != 1:
+              raise SystemExit('Could not create archive-scope mutation')
+          path.write_text(text.replace(marker, mutant, 1))
+          PY
+          set +e
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js -t 'keeps offline custom archives outside the glibc preflight' > "$RUNNER_TEMP/installer-review-validation/archive-mutation.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/installer-review-validation/archive-mutation.log"
+          test "$result" -ne 0
+          cp "$RUNNER_TEMP/installer-review-validation/installer.good.sh" scripts/installation/install-qwen-standalone.sh
+          bash -n scripts/installation/install-qwen-standalone.sh
+      - name: Run focused installer regression suites
         shell: bash
         run: |
           set -o pipefail
-          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js 2>&1 | tee "$RUNNER_TEMP/installer-validation/after.log"
-          npx --no-install prettier --check scripts/tests/install-glibc-preflight.test.js
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js 2>&1 | tee "$RUNNER_TEMP/installer-review-validation/glibc-tests.log"
+          npm run test:scripts -- scripts/tests/install-script.test.js 2>&1 | tee "$RUNNER_TEMP/installer-review-validation/install-script-tests.log"
+          npx --no-install prettier --check \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js \
+            scripts/installation/INSTALLATION_GUIDE.md
+          git diff --check
       - name: Run required full repository preflight
         shell: bash
         run: |
           set -o pipefail
-          if npm run preflight 2>&1 | tee "$RUNNER_TEMP/installer-validation/preflight-attempt-1.log"; then
+          if npm run preflight 2>&1 | tee "$RUNNER_TEMP/installer-review-validation/preflight-attempt-1.log"; then
             exit 0
           fi
-          echo 'First full preflight did not pass; rerunning the complete gate once to distinguish known shared-runner flakes from a persistent failure.'
-          npm run preflight 2>&1 | tee "$RUNNER_TEMP/installer-validation/preflight-attempt-2.log"
-      - name: Audit exact scope and publish only after every gate passes
+          echo 'First full preflight did not pass; rerunning the complete gate once because upstream tracks nondeterministic shared-runner failures in #10490.'
+          npm run preflight 2>&1 | tee "$RUNNER_TEMP/installer-review-validation/preflight-attempt-2.log"
+      - name: Audit exact scope and publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -152,27 +386,39 @@ jobs:
           git diff --check
           python3 - <<'PY'
           import subprocess
-          expected = {'scripts/installation/install-qwen-standalone.sh', 'scripts/tests/install-glibc-preflight.test.js'}
+          expected = {
+              'scripts/installation/INSTALLATION_GUIDE.md',
+              'scripts/installation/install-qwen-standalone.sh',
+              'scripts/tests/install-glibc-preflight.test.js',
+              'scripts/tests/install-script.test.js',
+          }
           changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           if changed != expected:
               raise SystemExit(f'Refusing to publish unrelated changes: {changed}')
-          if subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], text=True).strip():
-              raise SystemExit('Refusing to publish with untracked files')
+          untracked = subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], text=True).strip()
+          if untracked:
+              raise SystemExit(f'Refusing to publish with untracked files: {untracked}')
           PY
           gh auth setup-git
           remote_head="$(git ls-remote origin refs/heads/fix/7002-glibc-preflight | cut -f1)"
-          test "$remote_head" = "$EXPECTED_HEAD"
-          git add scripts/installation/install-qwen-standalone.sh scripts/tests/install-glibc-preflight.test.js
+          test "$remote_head" = "$START_HEAD"
+          git add \
+            scripts/installation/INSTALLATION_GUIDE.md \
+            scripts/installation/install-qwen-standalone.sh \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js
           git diff --cached --check
           git diff --cached --stat
-          git -c core.hooksPath=/dev/null commit -m 'fix(installer): recognize GNU libc in ldd fallback'
+          git -c core.hooksPath=/dev/null commit -m 'fix(installer): harden glibc preflight scope'
           git push origin HEAD:refs/heads/fix/7002-glibc-preflight
-          git rev-parse HEAD | tee "$RUNNER_TEMP/installer-validation/published-head.txt"
-      - name: Preserve genuine validation evidence
+          git rev-parse HEAD | tee "$RUNNER_TEMP/installer-review-validation/published-head.txt"
+          printf '%s\n' "$START_HEAD" > "$RUNNER_TEMP/installer-review-validation/start-head.txt"
+          printf '%s\n' "$UPSTREAM_HEAD" > "$RUNNER_TEMP/installer-review-validation/upstream-head.txt"
+      - name: Preserve genuine review validation evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: installer-pr-12115-current-main-validation
-          path: ${{ runner.temp }}/installer-validation
+          name: installer-pr-12115-review-validation
+          path: ${{ runner.temp }}/installer-review-validation
           retention-days: 14
           if-no-files-found: warn
