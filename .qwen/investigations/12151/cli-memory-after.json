@@ -1,0 +1,14 @@
+{
+  "phase": "after",
+  "node": "v22.16.0",
+  "heapLimitFlagMiB": 384,
+  "scratchDirectories": 60000,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "streamingRequests": 2,
+  "toolResultReturned": true,
+  "correctPathReturned": true,
+  "observedHeapOutOfMemory": false,
+  "completed": true
+}
