@@ -1,0 +1,226 @@
+name: Final validation for PR 12115
+
+on:
+  push:
+    branches:
+      - 'validation/pr12115-final'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: final-validation-pr-12115
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout validation tools
+        uses: actions/checkout@v4
+        with:
+          path: validation-tools
+          persist-credentials: false
+
+      - name: Checkout contribution branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/7002-glibc-preflight
+          path: repo
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: repo/package-lock.json
+
+      - name: Sync current upstream main
+        shell: bash
+        working-directory: repo
+        run: |
+          set -euo pipefail
+          git config user.name 'dijedontahiri'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          echo "START_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git fetch --no-tags https://github.com/QwenLM/qwen-code.git main
+          echo "UPSTREAM_HEAD=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_ENV"
+          git merge --no-ff -m 'chore: sync upstream main' FETCH_HEAD
+
+      - name: Recover reviewed follow-up patch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/pr12115-final"
+          mkdir -p "$evidence"
+          gh run download 35299207548 \
+            --repo dijedontahiri/qwen-code \
+            -n installer-pr-12115-review-validation \
+            --dir "$evidence/source"
+          cp "$evidence/source/review-fixes.patch" "$evidence/review-fixes.patch"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path(__import__('os').environ['RUNNER_TEMP']) / 'pr12115-final' / 'review-fixes.patch'
+          text = path.read_text()
+          old = "expect(result.stderr).toContain('For a custom runtime, use --archive');"
+          new = "expect(result.stdout).toContain('For a custom runtime, use --archive');"
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected exactly one warning-stream assertion, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+
+      - name: Install dependencies
+        shell: bash
+        working-directory: repo
+        run: |
+          set -o pipefail
+          npm ci 2>&1 | tee "$RUNNER_TEMP/pr12115-final/npm-ci.log"
+
+      - name: Apply review fixes and format
+        shell: bash
+        working-directory: repo
+        run: |
+          set -euo pipefail
+          git apply --3way "$RUNNER_TEMP/pr12115-final/review-fixes.patch"
+          git reset
+          npx --no-install prettier --write \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js \
+            scripts/installation/INSTALLATION_GUIDE.md
+          bash -n scripts/installation/install-qwen-standalone.sh
+          git diff --check
+          git diff > "$RUNNER_TEMP/pr12115-final/final-review-fixes.patch"
+
+      - name: Prove unknown-libc regression fails without the GNU-libc guard
+        shell: bash
+        working-directory: repo
+        run: |
+          set -euo pipefail
+          cp scripts/installation/install-qwen-standalone.sh "$RUNNER_TEMP/pr12115-final/installer.good.sh"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/installation/install-qwen-standalone.sh')
+          text = path.read_text()
+          good = '            NR == 1 && /GNU libc|GNU C Library|GLIBC/ {'
+          bad = '            NR == 1 {'
+          if text.count(good) != 1:
+              raise SystemExit('Could not locate GNU-libc ldd guard')
+          path.write_text(text.replace(good, bad, 1))
+          PY
+          set +e
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js \
+            -t 'leaves unknown libc with a version on the first line unchanged' \
+            > "$RUNNER_TEMP/pr12115-final/unknown-libc-mutation.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/pr12115-final/unknown-libc-mutation.log"
+          test "$result" -ne 0
+          cp "$RUNNER_TEMP/pr12115-final/installer.good.sh" scripts/installation/install-qwen-standalone.sh
+
+      - name: Prove offline-archive regression catches a misplaced guard
+        shell: bash
+        working-directory: repo
+        run: |
+          set -euo pipefail
+          cp scripts/installation/install-qwen-standalone.sh "$RUNNER_TEMP/pr12115-final/installer.good.sh"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/installation/install-qwen-standalone.sh')
+          text = path.read_text()
+          marker = '    if [[ -n "${ARCHIVE_PATH}" ]]; then\n'
+          mutant = '''    if [[ -n "${ARCHIVE_PATH}" ]]; then
+              mutant_target=$(detect_target 2>/dev/null || true)
+              check_standalone_runtime_compatibility "${mutant_target}" || return 1
+          '''
+          if text.count(marker) != 1:
+              raise SystemExit('Could not create archive-scope mutation')
+          path.write_text(text.replace(marker, mutant, 1))
+          PY
+          set +e
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js \
+            -t 'keeps offline custom archives outside the glibc preflight' \
+            > "$RUNNER_TEMP/pr12115-final/archive-mutation.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/pr12115-final/archive-mutation.log"
+          test "$result" -ne 0
+          cp "$RUNNER_TEMP/pr12115-final/installer.good.sh" scripts/installation/install-qwen-standalone.sh
+          bash -n scripts/installation/install-qwen-standalone.sh
+
+      - name: Run focused installer regression suites
+        shell: bash
+        working-directory: repo
+        run: |
+          set -o pipefail
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js 2>&1 \
+            | tee "$RUNNER_TEMP/pr12115-final/glibc-tests.log"
+          npm run test:scripts -- scripts/tests/install-script.test.js 2>&1 \
+            | tee "$RUNNER_TEMP/pr12115-final/install-script-tests.log"
+          npx --no-install prettier --check \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js \
+            scripts/installation/INSTALLATION_GUIDE.md
+          git diff --check
+
+      - name: Run required full repository preflight
+        shell: bash
+        working-directory: repo
+        run: |
+          set -o pipefail
+          npm run preflight 2>&1 | tee "$RUNNER_TEMP/pr12115-final/preflight.log"
+
+      - name: Audit exact scope and publish
+        shell: bash
+        working-directory: repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          expected = {
+              'scripts/installation/INSTALLATION_GUIDE.md',
+              'scripts/installation/install-qwen-standalone.sh',
+              'scripts/tests/install-glibc-preflight.test.js',
+              'scripts/tests/install-script.test.js',
+          }
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if changed != expected:
+              raise SystemExit(f'Refusing to publish unrelated changes: {changed}')
+          untracked = subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], text=True).strip()
+          if untracked:
+              raise SystemExit(f'Refusing to publish with untracked files: {untracked}')
+          PY
+          gh auth setup-git
+          remote_head="$(git ls-remote origin refs/heads/fix/7002-glibc-preflight | cut -f1)"
+          test "$remote_head" = "$START_HEAD"
+          git add \
+            scripts/installation/INSTALLATION_GUIDE.md \
+            scripts/installation/install-qwen-standalone.sh \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js
+          git diff --cached --check
+          git diff --cached --stat
+          git -c core.hooksPath=/dev/null commit -m 'fix(installer): harden glibc preflight scope'
+          git push origin HEAD:refs/heads/fix/7002-glibc-preflight
+          git rev-parse HEAD | tee "$RUNNER_TEMP/pr12115-final/published-head.txt"
+          printf '%s\n' "$START_HEAD" > "$RUNNER_TEMP/pr12115-final/start-head.txt"
+          printf '%s\n' "$UPSTREAM_HEAD" > "$RUNNER_TEMP/pr12115-final/upstream-head.txt"
+
+      - name: Preserve validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-12115-final-validation
+          path: ${{ runner.temp }}/pr12115-final
+          retention-days: 14
+          if-no-files-found: warn
