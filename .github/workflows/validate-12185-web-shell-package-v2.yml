@@ -1,0 +1,89 @@
+name: Validate issue 12185 web-shell package
+
+on:
+  push:
+    branches:
+      - validation/12185-web-shell-package-20260918-v2
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Reproduce package defects on upstream base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --force e596a410bbd58313b6db069eed1cbb33bd3dbd8f
+          rm -rf packages/web-shell/dist
+          npm run build --workspace @qwen-code/web-shell
+          mapfile -t offenders < <(grep -RIlE "['\"]@/" packages/web-shell/dist/types --include='*.d.ts' | sort)
+          printf 'Baseline declaration offenders (%s):\n%s\n' "${#offenders[@]}" "${offenders[*]}"
+          test "${#offenders[@]}" -eq 3
+          printf '%s\n' "${offenders[@]}" | grep -F 'packages/web-shell/dist/types/components/ui/alert-dialog.d.ts'
+          printf '%s\n' "${offenders[@]}" | grep -F 'packages/web-shell/dist/types/components/ui/field.d.ts'
+          printf '%s\n' "${offenders[@]}" | grep -F 'packages/web-shell/dist/types/components/ui/toggle-group.d.ts'
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync('packages/web-shell/package.json', 'utf8'));
+          if (manifest.scripts?.prepack) throw new Error('baseline unexpectedly has a prepack export guard');
+          const config = readFileSync('packages/web-shell/vite.lib.config.ts', 'utf8');
+          const omitted = [
+            '@xterm/xterm',
+            '@xterm/addon-fit',
+            '@tanstack/react-table',
+            '@tanstack/react-virtual',
+            'fzf',
+            '@modelcontextprotocol/ext-apps',
+          ];
+          for (const dependency of omitted) {
+            if (config.includes(`'${dependency}'`)) {
+              throw new Error(`baseline unexpectedly externalizes ${dependency}`);
+            }
+          }
+          console.log('Baseline confirms no prepack guard and all six declared runtime dependencies are absent from the external list.');
+          NODE
+      - name: Build and validate candidate package boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --force 83f5b025a5f2459eebbc158ac13c9733980a5926
+          rm -rf packages/web-shell/dist
+          npm run build --workspace @qwen-code/web-shell
+          ! grep -RIlE "['\"]@/" packages/web-shell/dist/types --include='*.d.ts'
+          npm run test:ci --workspace @qwen-code/web-shell -- vite.lib.externals.test.ts
+          npm run verify --workspace @qwen-code/web-shell
+          npm run prepack --workspace @qwen-code/web-shell
+          cp packages/web-shell/dist/transcript.js /tmp/transcript.js
+          rm packages/web-shell/dist/transcript.js
+          if npm run prepack --workspace @qwen-code/web-shell; then
+            echo 'prepack unexpectedly accepted a missing export target' >&2
+            exit 1
+          fi
+          mv /tmp/transcript.js packages/web-shell/dist/transcript.js
+          npm run prepack --workspace @qwen-code/web-shell
+          (cd packages/web-shell && npm pack --dry-run --json > /tmp/web-shell-pack.json)
+          cat /tmp/web-shell-pack.json
+          git diff --check e596a410bbd58313b6db069eed1cbb33bd3dbd8f...HEAD
+      - name: Full repository preflight
+        run: npm run preflight
+      - name: Verify exact tested contribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = '83f5b025a5f2459eebbc158ac13c9733980a5926'
+          git diff --check e596a410bbd58313b6db069eed1cbb33bd3dbd8f...HEAD
+          remote_head="$(git ls-remote origin refs/heads/fix/12185-web-shell-declarations | cut -f1)"
+          test "$remote_head" = '83f5b025a5f2459eebbc158ac13c9733980a5926'
+          upstream_head="$(git ls-remote https://github.com/QwenLM/qwen-code.git refs/heads/main | cut -f1)"
+          test "$upstream_head" = 'e596a410bbd58313b6db069eed1cbb33bd3dbd8f'
+          git status --short
