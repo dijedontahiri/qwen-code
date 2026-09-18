@@ -6,8 +6,8 @@ permissions:
   contents: read
 env:
   CI: 'true'
-  CANDIDATE_SHA: 8aa4768e93bf030dbfa6e8ad2f30240818f2762e
-  BASE_SHA: f2e653b5e64c2a0be4dcd64d75f00c167312ba04
+  CANDIDATE_SHA: e1ae92dd9f4031f7a24699e79b69ffd9cfe28577
+  BASE_SHA: 8b39d93a4298eb5fdd3c800f7628f4f0d2152c82
 jobs:
   preflight-and-cli:
     runs-on: ubuntu-latest
@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 8aa4768e93bf030dbfa6e8ad2f30240818f2762e
+          ref: e1ae92dd9f4031f7a24699e79b69ffd9cfe28577
           fetch-depth: 10
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
