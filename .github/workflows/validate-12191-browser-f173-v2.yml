@@ -1,0 +1,114 @@
+name: Validate issue 12185 document fallback
+
+on:
+  push:
+    branches:
+      - validation/12191-browser-f173-v2-20260918
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: f17370c06965f27d6b82ec14fbae855293f83f93
+  SOURCE_TREE: b0ef17e3e0163dab6f8fa77c2975e9ddc1a5471
+
+jobs:
+  browser:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: f17370c06965f27d6b82ec14fbae855293f83f93
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.23.2
+          cache: npm
+      - name: Verify immutable product source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Install locked dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: npm ci --no-audit --progress=false
+      - name: Build actual document renderer
+        run: npm run build
+      - name: Render export-safe recorded MCP fallback in Chromium
+        env:
+          OUT: ${{ runner.temp }}/qwen-12191-browser
+        run: |
+          mkdir -p "$OUT"
+          npx --no-install playwright install chromium
+          node --input-type=module <<'JS'
+          import {chromium} from 'playwright';
+          import {readFile,writeFile} from 'node:fs/promises';
+          import {createServer} from 'node:http';
+          import {join} from 'node:path';
+          import assert from 'node:assert/strict';
+          const dir='packages/web-templates/src/export-html/dist';
+          let html=await readFile(join(dir,'document.html'),'utf8');
+          const js=await readFile(join(dir,'export-transcript-document.js'));
+          const css=await readFile(join(dir,'export-transcript-document.css'));
+          const generated=await readFile('packages/web-templates/src/generated/exportTranscriptDocumentTemplate.ts','utf8');
+          const version=JSON.parse(generated.match(/export const EXPORT_TRANSCRIPT_RENDERER_VERSION = ("[^"]+")/)[1]);
+          const common={createdAt:1,clientReceivedAt:1,updatedAt:1};
+          const blocks=[
+            {...common,id:'question',kind:'user',text:'Show the recorded MCP result.'},
+            {...common,id:'tool',kind:'tool',toolCallId:'fixture-call',toolName:'mcp__fixture__demo',title:'MCP fixture',status:'completed',preview:{kind:'mcp_invocation',serverId:'fixture',toolName:'demo'},resultPreview:{kind:'text',text:'Recorded MCP fixture result'}},
+            {...common,id:'answer',kind:'assistant',text:'The recorded result is shown above.'},
+          ];
+          const envelope={schemaVersion:1,rendererVersion:version,blocks,diagnostics:[],metadata:{title:'MCP export boundary verification',exportedAt:new Date().toISOString(),complete:true,truncated:false}};
+          html=html.replaceAll('__EXPORT_NONCE__','qwen-validation-12191');
+          const pattern=/(<script\b[^>]*\bid="transcript-document"[^>]*>)[\s\S]*?(<\/script>)/;
+          assert(pattern.test(html),'Missing document envelope element');
+          html=html.replace(pattern,(_,a,b)=>a+JSON.stringify(envelope).replaceAll('<','\\u003c')+b);
+          await writeFile(join(process.env.OUT,'document-fixture.html'),html);
+          const server=createServer((req,res)=>{if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end(html);}else{res.writeHead(404);res.end();}});
+          await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+          const browser=await chromium.launch();
+          const page=await browser.newPage({viewport:{width:1280,height:900}});
+          const errors=[],unexpected=[];
+          try {
+            page.on('pageerror',error=>errors.push(error.message));
+            const origin='http://127.0.0.1:'+server.address().port;
+            await page.route('**/*',async route=>{
+              const url=new URL(route.request().url());
+              if(url.origin===origin){await route.continue();return;}
+              if(url.hostname==='unpkg.com' && url.pathname.endsWith('/export-transcript-document.js')){await route.fulfill({status:200,contentType:'text/javascript',headers:{'access-control-allow-origin':'*'},body:js});return;}
+              if(url.hostname==='unpkg.com' && url.pathname.endsWith('/export-transcript-document.css')){await route.fulfill({status:200,contentType:'text/css',headers:{'access-control-allow-origin':'*'},body:css});return;}
+              unexpected.push(url.origin+url.pathname); await route.abort();
+            });
+            await page.goto(origin,{waitUntil:'networkidle'});
+            await page.getByText('Recorded MCP fixture result',{exact:true}).waitFor({state:'visible',timeout:15000});
+            const iframeCount=await page.locator('iframe').count();
+            assert.equal(iframeCount,0);
+            assert.deepEqual(errors,[]);
+            assert.deepEqual(unexpected,[]);
+            await page.screenshot({path:join(process.env.OUT,'document-mcp-fallback.png'),fullPage:true});
+            await writeFile(join(process.env.OUT,'browser-result.json'),JSON.stringify({source:process.env.SOURCE_SHA,errors,unexpected,iframeCount,recordedFallbackVisible:true},null,2));
+            console.log('Export-safe MCP result preview rendered as fallback with zero iframes, external requests, and page errors.');
+          } finally {
+            await browser.close();
+            await new Promise(resolve=>server.close(resolve));
+          }
+          JS
+      - name: Verify document boundary and clean immutable source
+        run: |
+          grep -q 'MCP Apps and the MCP SDK must not be inputs' .qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --exit-code "$SOURCE_SHA" -- .
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Preserve genuine browser evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qwen-12191-browser-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}/qwen-12191-browser
+          retention-days: 14
+          if-no-files-found: warn
