@@ -1,0 +1,67 @@
+name: Verify ignore cache CI registration
+on:
+  push:
+    branches: [validate/ignore-cache-ci-registration-20260918]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CI: true
+      QWEN_SANDBOX: 'false'
+      QWEN_DEBUG_LOG_FILE: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: e8958da6051a302fe9eb9f9b1ccb7e0ec1e64df5
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22.16.0'
+      - name: Verify registration and scope
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const old = JSON.parse(execFileSync('git', ['show', 'HEAD^:package.json'], {encoding:'utf8'}));
+          const current = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const name = 'test:integration:no-ak:sandbox:none';
+          assert(!old.scripts[name].includes('./glob-ignore-cache.test.ts'));
+          assert.equal(current.scripts[name], old.scripts[name].replace('./fake-openai-server.test.ts', './fake-openai-server.test.ts ./glob-ignore-cache.test.ts'));
+          assert(fs.readFileSync('.github/workflows/ci.yml', 'utf8').includes(name));
+          current.scripts[name] = old.scripts[name];
+          assert.deepEqual(current, old);
+          assert.equal(execFileSync('git', ['diff', '--name-only', 'HEAD^', 'HEAD'], {encoding:'utf8'}).trim(), 'package.json');
+          JS
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+          npm run bundle
+      - name: Focused parser suites
+        working-directory: packages/core
+        run: node ../../node_modules/vitest/vitest.mjs run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts --maxWorkers=1
+      - name: Exercise the actual no-key script with the new test selected
+        run: |
+          npm run test:integration:no-ak:sandbox:none -- --retry=0 --testNamePattern='Glob ignore-cache rollover' --reporter=default --reporter=json --outputFile=/tmp/no-key-result.json
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          const result = JSON.parse(fs.readFileSync('/tmp/no-key-result.json', 'utf8'));
+          const file = result.testResults.find(f => f.name.endsWith('/glob-ignore-cache.test.ts'));
+          assert(file, 'The actual CI script must discover the new test');
+          assert.equal(file.assertionResults.length, 1);
+          assert.equal(file.assertionResults[0].status, 'passed');
+          assert.equal(result.numFailedTests, 0);
+          JS
+      - name: Manifest formatting and clean source
+        run: |
+          node node_modules/prettier/bin/prettier.cjs --check package.json
+          git diff --check
+          git diff --exit-code
+          test "$(git rev-parse HEAD)" = e8958da6051a302fe9eb9f9b1ccb7e0ec1e64df5
