@@ -48,6 +48,9 @@ jobs:
       - name: Install repository dependencies
         run: node scripts/setup-worktree.js
 
+      - name: Build workspace prerequisites
+        run: npm run build
+
       - name: Prove declaration baseline fails before rewrite
         shell: bash
         run: |
@@ -55,9 +58,6 @@ jobs:
           rm -rf packages/web-shell/dist
           (
             cd packages/web-shell
-            npx vite build
-            npx vite build --config vite.lib.config.ts
-            npx vite build --config vite.lib.config.ts --mode transcript
             npx tsc -p tsconfig.lib.json
           )
           grep -R -n -E "\\b(from|import[[:space:]]*\\(|require[[:space:]]*\\()[[:space:]]*['\"]@/" packages/web-shell/dist/types > /tmp/baseline-aliases
@@ -71,10 +71,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node packages/web-shell/scripts/rewrite-declaration-aliases.mjs
+          npm run build --workspace=@qwen-code/web-shell
           node packages/web-shell/scripts/verify-package.mjs
           npm run test:ci --workspace=@qwen-code/web-shell -- build-boundary.test.ts
-          npm run build --workspace=@qwen-code/web-shell
           npm pack --workspace=@qwen-code/web-shell --dry-run --json > /tmp/web-shell-pack.json
           node -e "const p=require('/tmp/web-shell-pack.json'); if(!Array.isArray(p)||!p[0]?.files?.length) process.exit(1)"
 
