@@ -1,0 +1,4 @@
+[
+  {"phase":"before","exitCode":-6,"heapLimitFlagMiB":128,"directories":12000,"ignoreVersion":"7.0.5","observedHeapOutOfMemory":true,"completed":false},
+  {"phase":"after","exitCode":0,"heapLimitFlagMiB":128,"directories":12000,"ignoreVersion":"7.0.5","observedHeapOutOfMemory":false,"completed":true}
+]
