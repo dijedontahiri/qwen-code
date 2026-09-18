@@ -1,0 +1,85 @@
+name: Validate issue 12215 sed long options
+on:
+  push:
+    branches: [validation/12215-6f622d50-20260918-r9]
+    paths: [.github/workflows/validate-12215-6f622d50.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      CI: 'true'
+      SOURCE_SHA: 6f622d50db8da5c5516b0206d9c4e6e3abe8d459
+      BASE_SHA: 537311b8a5d85fd12ab2cff84b418e3a908ca830
+    steps:
+      - name: Check out immutable candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 6f622d50db8da5c5516b0206d9c4e6e3abe8d459
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Verify exact candidate and scope
+        run: |
+          mkdir -p /tmp/evidence
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 2
+          test "$(git diff --name-only "$BASE_SHA" HEAD | sort | tr '\n' ' ')" = "packages/core/src/utils/shell-safety-rules.ts packages/core/src/utils/shell-sed-long-options.test.ts "
+          git diff --check "$BASE_SHA" HEAD
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Install locked dependencies
+        run: |
+          npm ci --no-audit --no-fund > /tmp/evidence/npm-ci.log 2>&1 || { tail -n 180 /tmp/evidence/npm-ci.log; exit 1; }
+          node --version | tee /tmp/evidence/node-version.txt
+          npm --version | tee /tmp/evidence/npm-version.txt
+      - name: Prove regression fails on baseline implementation
+        run: |
+          file=packages/core/src/utils/shell-safety-rules.ts
+          cp "$file" /tmp/evidence/candidate-shell-safety-rules.ts
+          git show "$BASE_SHA:$file" > "$file"
+          set +e
+          npm exec --workspace=@qwen-code/qwen-code-core -- vitest run src/utils/shell-sed-long-options.test.ts --coverage.enabled=false --retry=0 > /tmp/evidence/baseline-negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F -- '--quiet matches -n read-only semantics' /tmp/evidence/baseline-negative.log
+          grep -F -- '--silent matches -n read-only semantics' /tmp/evidence/baseline-negative.log
+          cp /tmp/evidence/candidate-shell-safety-rules.ts "$file"
+          git diff --exit-code "$SOURCE_SHA" -- "$file"
+      - name: Focused classifier and consumer regressions
+        run: |
+          npm exec --workspace=@qwen-code/qwen-code-core -- vitest run src/utils/shell-sed-long-options.test.ts src/utils/shellReadOnlyChecker.test.ts src/utils/shellAstParser.test.ts --coverage.enabled=false --retry=0 > /tmp/evidence/focused-tests.log 2>&1 || { tail -n 220 /tmp/evidence/focused-tests.log; exit 1; }
+          tail -n 80 /tmp/evidence/focused-tests.log
+      - name: Type, lint, and format checks
+        run: |
+          npm run typecheck --workspace=@qwen-code/qwen-code-core > /tmp/evidence/typecheck.log 2>&1 || { tail -n 180 /tmp/evidence/typecheck.log; exit 1; }
+          npm exec -- eslint packages/core/src/utils/shell-safety-rules.ts packages/core/src/utils/shell-sed-long-options.test.ts > /tmp/evidence/eslint.log 2>&1 || { cat /tmp/evidence/eslint.log; exit 1; }
+          npm exec -- prettier --experimental-cli --check packages/core/src/utils/shell-safety-rules.ts packages/core/src/utils/shell-sed-long-options.test.ts
+      - name: Full repository preflight
+        run: |
+          npm run preflight > /tmp/evidence/preflight.log 2>&1 || { tail -n 260 /tmp/evidence/preflight.log; exit 1; }
+          tail -n 80 /tmp/evidence/preflight.log
+      - name: Verify exact final source and clean worktree
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$BASE_SHA" HEAD
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-12215-6f622d50-evidence
+          path: /tmp/evidence
+          retention-days: 14
+          if-no-files-found: warn
