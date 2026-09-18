@@ -24,7 +24,6 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 22
-          cache: npm
 
       - name: Verify contribution scope
         shell: bash
@@ -46,8 +45,12 @@ jobs:
           git diff --name-only "$BASE_SHA" HEAD | sort > /tmp/actual-files
           diff -u /tmp/expected-files /tmp/actual-files
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install repository dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm install --frozen-lockfile
 
       - name: Prove declaration baseline fails before rewrite
         shell: bash
