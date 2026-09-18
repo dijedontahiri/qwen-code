@@ -1,0 +1,68 @@
+name: Validate issue 12151 review repair
+
+on:
+  push:
+    branches:
+      - validation/12156-f7ed7ab
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TARGET_SHA: f7ed7abeeb456d600d99b848072c678ad3f0d576
+      BASELINE_SHA: 02c246659a69297fca66b64efd06117ce9168129
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f7ed7abeeb456d600d99b848072c678ad3f0d576
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+      - name: Verify immutable contribution checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASELINE_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Install repository prerequisites
+        run: npm ci
+      - name: Prove regression fails on previous production source
+        shell: bash
+        run: |
+          git show "$BASELINE_SHA:packages/core/src/utils/gitIgnoreParser.ts" > packages/core/src/utils/gitIgnoreParser.ts
+          set +e
+          output=$(cd packages/core && npx vitest run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -ne 0
+          grep -F "does not partially reload missing ignore files after matcher rollover" <<<"$output"
+          git checkout "$TARGET_SHA" -- packages/core/src/utils/gitIgnoreParser.ts
+          git diff --exit-code "$TARGET_SHA" -- packages/core/src/utils/gitIgnoreParser.ts
+      - name: Focused GitIgnoreParser regressions on candidate
+        run: |
+          cd packages/core
+          npx vitest run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts
+      - name: Full repository preflight
+        run: npm run preflight
+      - name: Bundle exact candidate
+        run: npm run bundle
+      - name: Real bundled CLI sparse-glob regression
+        env:
+          CI: 'true'
+          QWEN_SANDBOX: 'false'
+          QWEN_DEBUG_LOG_FILE: '0'
+        run: node node_modules/vitest/vitest.mjs run --root ./integration-tests cli/glob-ignore-cache.test.ts --retry=0
+      - name: Audit exact candidate tree
+        run: |
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git diff --check "$TARGET_SHA"
+          git diff --exit-code "$TARGET_SHA" -- .
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
