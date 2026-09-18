@@ -1,0 +1,132 @@
+name: Validate issue 7002 review fixes
+
+on:
+  push:
+    branches:
+      - validation/7002-0647a394
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PRODUCT_SHA: 0647a394c9a467e6a542a2fc686e2043052456b8
+    steps:
+      - name: Check out immutable product source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+          cache: npm
+
+      - name: Verify exact source and clean initial tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          node --version
+          npm --version
+          df -h .
+
+      - name: Install locked dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: npm ci --no-audit --progress=false
+
+      - name: Prove base-url warning guard is load-bearing
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=scripts/installation/install-qwen-standalone.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/installation/install-qwen-standalone.sh')
+          s=p.read_text()
+          old='''    if [[ -n "${BASE_URL}" ]]; then\n        log_warning "--base-url mirrors are checked against the official standalone runtime requirement. For a custom runtime, use --archive after verifying compatibility with this host."\n    fi\n'''
+          new='''    log_warning "--base-url mirrors are checked against the official standalone runtime requirement. For a custom runtime, use --archive after verifying compatibility with this host."\n'''
+          assert old in s
+          p.write_text(s.replace(old,new,1))
+          PY
+          set +e
+          npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/install-glibc-preflight.test.js -t 'rejects glibc 2.17 before any release download' --reporter=json --outputFile=/tmp/base-url-negative.json
+          code=$?
+          set -e
+          test "$code" -ne 0
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const r=JSON.parse(fs.readFileSync('/tmp/base-url-negative.json','utf8'));
+          const failed=r.testResults.flatMap(s=>s.assertionResults ?? []).filter(a=>a.status==='failed');
+          if (r.numFailedTests !== 1 || failed.length !== 1 || !failed[0].fullName.includes('rejects glibc 2.17 before any release download')) throw new Error(JSON.stringify(failed));
+          const messages=(failed[0].failureMessages ?? []).join('\n');
+          if (!messages.includes('--base-url mirrors are checked')) throw new Error(messages);
+          console.log('Guard mutation failed the intended plain-install warning assertion.');
+          JS
+          git restore --source="$PRODUCT_SHA" -- "$file"
+          git diff --exit-code "$PRODUCT_SHA" -- "$file"
+
+      - name: Prove distro GLIBC parser arm is covered
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=scripts/installation/install-qwen-standalone.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/installation/install-qwen-standalone.sh')
+          s=p.read_text()
+          old='NR == 1 && /GNU libc|GNU C Library|GLIBC/ {'
+          new='NR == 1 && /GNU libc|GNU C Library/ {'
+          assert old in s
+          p.write_text(s.replace(old,new,1))
+          PY
+          set +e
+          npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/install-glibc-preflight.test.js -t 'rejects an old distro-branded glibc banner via ldd' --reporter=json --outputFile=/tmp/distro-negative.json
+          code=$?
+          set -e
+          test "$code" -ne 0
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const r=JSON.parse(fs.readFileSync('/tmp/distro-negative.json','utf8'));
+          const failed=r.testResults.flatMap(s=>s.assertionResults ?? []).filter(a=>a.status==='failed');
+          if (r.numFailedTests !== 1 || failed.length !== 1 || !failed[0].fullName.includes('rejects an old distro-branded glibc banner via ldd')) throw new Error(JSON.stringify(failed));
+          const messages=(failed[0].failureMessages ?? []).join('\n');
+          if (!messages.includes('this system has glibc 2.17')) throw new Error(messages);
+          console.log('GLIBC-arm mutation failed the intended distro-banner assertion.');
+          JS
+          git restore --source="$PRODUCT_SHA" -- "$file"
+          git diff --exit-code "$PRODUCT_SHA" -- "$file"
+
+      - name: Focused installer regressions
+        run: |
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js
+          npm run test:scripts -- scripts/tests/install-script.test.js
+
+      - name: Shell and formatting checks
+        run: |
+          node scripts/lint.js --shellcheck
+          npx prettier --experimental-cli --check scripts/tests/install-glibc-preflight.test.js
+          git diff --check
+
+      - name: Full preflight
+        run: npm run preflight
+
+      - name: Verify exact final source and clean worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
