@@ -15,8 +15,14 @@ jobs:
         with:
           node-version: 22.16.0
           cache: npm
-      - name: Install without repository prepare
-        run: npm ci --ignore-scripts
+      - name: Install without full repository prepare
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: npm ci
+      - name: Build workspace prerequisites used by export renderer
+        run: |
+          npm run build --workspace=packages/core
+          npm run build --workspace=packages/sdk-typescript
       - name: Measure export renderer for each newly externalized dependency
         shell: bash
         run: |
@@ -38,6 +44,10 @@ jobs:
             local rc=$?
             set -e
             grep -E 'Document export top inputs|Document export renderer JS is' "/tmp/export-$label.log" || true
+            if [[ $rc -ne 0 ]]; then
+              echo "--- export failure tail ($label) ---"
+              tail -n 30 "/tmp/export-$label.log"
+            fi
             echo "export-build-exit=$rc"
           }
 
