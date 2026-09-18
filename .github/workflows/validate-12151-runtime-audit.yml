@@ -1,0 +1,39 @@
+name: Issue 12151 critical runtime audit
+on:
+  push:
+    branches: [validation/12151-runtime-audit]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 66e433d76d1631dfa5a84d6222e8a2b2d81dfade
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Run repository critical-runtime audit
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 66e433d76d1631dfa5a84d6222e8a2b2d81dfade
+          npm run audit:runtime:critical 2>&1 | tee "$RUNNER_TEMP/qwen-12151-runtime-audit.log"
+      - name: Require an actual audited payload with zero critical runtime findings
+        run: |
+          set -euo pipefail
+          npm audit --omit=dev --audit-level=critical --json > "$RUNNER_TEMP/qwen-12151-runtime-audit.json"
+          node --input-type=module -e "import fs from 'node:fs'; import assert from 'node:assert/strict'; const audit=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+'/qwen-12151-runtime-audit.json','utf8')); assert.ok(audit.metadata?.vulnerabilities,'Audit did not return vulnerability metadata'); assert.equal(audit.metadata.vulnerabilities.critical,0); console.log(JSON.stringify(audit.metadata.vulnerabilities,null,2));"
+          git diff --exit-code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: issue-12151-runtime-audit
+          path: ${{ runner.temp }}/qwen-12151-runtime-audit.*
+          retention-days: 14
+          if-no-files-found: error
