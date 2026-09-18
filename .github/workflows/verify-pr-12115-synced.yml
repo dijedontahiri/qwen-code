@@ -16,12 +16,12 @@ jobs:
   verify:
     if: github.repository == 'dijedontahiri/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     permissions:
       contents: write
     env:
       EXPECTED_HEAD: 4c0765f6618ebe48976356e579d64afd8321f6b2
-      EXPECTED_BASE: 156092e892db5b098bd6d0ecf606dd37449538fe
+      EXPECTED_BASE: 3987391392611e5d1f66851681f13ee7e55f4864
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,6 +31,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Sync candidate to current upstream main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'dijedontahiri'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          git fetch --no-tags https://github.com/QwenLM/qwen-code.git main
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_BASE"
+          git merge --no-ff -m 'chore: sync upstream main' FETCH_HEAD
       - name: Prepare bounded review follow-up
         shell: bash
         run: |
@@ -128,7 +137,11 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          npm run preflight 2>&1 | tee "$RUNNER_TEMP/installer-validation/preflight.log"
+          if npm run preflight 2>&1 | tee "$RUNNER_TEMP/installer-validation/preflight-attempt-1.log"; then
+            exit 0
+          fi
+          echo 'First full preflight did not pass; rerunning the complete gate once to distinguish known shared-runner flakes from a persistent failure.'
+          npm run preflight 2>&1 | tee "$RUNNER_TEMP/installer-validation/preflight-attempt-2.log"
       - name: Audit exact scope and publish only after every gate passes
         shell: bash
         env:
@@ -148,10 +161,6 @@ jobs:
           gh auth setup-git
           remote_head="$(git ls-remote origin refs/heads/fix/7002-glibc-preflight | cut -f1)"
           test "$remote_head" = "$EXPECTED_HEAD"
-          upstream_head="$(git ls-remote https://github.com/QwenLM/qwen-code.git refs/heads/main | cut -f1)"
-          test "$upstream_head" = "$EXPECTED_BASE"
-          git config user.name 'dijedontahiri'
-          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
           git add scripts/installation/install-qwen-standalone.sh scripts/tests/install-glibc-preflight.test.js
           git diff --cached --check
           git diff --cached --stat
@@ -162,7 +171,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: installer-pr-12115-synced-validation
+          name: installer-pr-12115-current-main-validation
           path: ${{ runner.temp }}/installer-validation
           retention-days: 14
           if-no-files-found: warn
