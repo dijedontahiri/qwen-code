@@ -9,14 +9,14 @@ import * as path from 'node:path';
 import ignore from 'ignore';
 import { isPathWithinRoot } from './workspaceContext.js';
 
-// Bound transient compiled matcher and per-path matcher caches during large scans.
-const MATCHER_CACHE_RESET_INTERVAL = 10_000;
-
 export interface GitIgnoreFilter {
   isIgnored(filePath: string): boolean;
 }
 
 export class GitIgnoreParser implements GitIgnoreFilter {
+  // Bound transient compiled matcher and per-path matcher caches during large scans.
+  private static readonly MATCHER_CACHE_RESET_INTERVAL = 10_000;
+
   private projectRoot: string;
   private cache: Map<string, string[]> = new Map();
   private globalPatterns: string[] | undefined;
@@ -241,7 +241,10 @@ export class GitIgnoreParser implements GitIgnoreFilter {
   }
 
   private resetMatcherCachesIfNeeded(): void {
-    if (this.matcherChecksSinceReset < MATCHER_CACHE_RESET_INTERVAL) {
+    if (
+      this.matcherChecksSinceReset <
+      GitIgnoreParser.MATCHER_CACHE_RESET_INTERVAL
+    ) {
       return;
     }
 

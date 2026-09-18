@@ -10,8 +10,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { GitIgnoreParser } from './gitIgnoreParser.js';
 
-// Exercise a complete production matcher-evaluation window.
-const LOOKUP_WINDOW = 10_000;
+// Exercise a complete production matcher-evaluation window without duplicating
+// its tuning value in the regression suite.
+const LOOKUP_WINDOW = GitIgnoreParser['MATCHER_CACHE_RESET_INTERVAL'];
 
 describe('GitIgnoreParser cache retention', () => {
   let root: string;
