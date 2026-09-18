@@ -71,18 +71,18 @@ jobs:
               raise SystemExit('document stub anchor changed')
           text = text.replace(stub_anchor, stub_replacement, 1)
 
-          resolve_anchor = """    build.onResolve({ filter: /^mermaid(\\/|$)/ }, () => ({
-              path: documentMermaidStub,
-            }));
-          """
-          resolve_replacement = resolve_anchor + """    build.onResolve(
-              { filter: /^@modelcontextprotocol\\/ext-apps\\/app-bridge$/ },
-              () => ({ path: documentMcpAppBridgeStub }),
-            );
-          """
-          if text.count(resolve_anchor) != 1:
-              raise SystemExit('strip plugin resolver anchor changed')
-          text = text.replace(resolve_anchor, resolve_replacement, 1)
+          resolver_tail = "      path: documentMermaidStub,\n    }));\n"
+          if text.count(resolver_tail) != 1:
+              raise SystemExit('mermaid resolver tail changed')
+          text = text.replace(
+              resolver_tail,
+              resolver_tail
+              + "    build.onResolve(\n"
+              + "      { filter: /^@modelcontextprotocol\\/ext-apps\\/app-bridge$/ },\n"
+              + "      () => ({ path: documentMcpAppBridgeStub }),\n"
+              + "    );\n",
+              1,
+          )
           build.write_text(text)
 
           stub = Path(
