@@ -1,0 +1,69 @@
+name: Validate PR 12156 exact source
+
+on:
+  push:
+    branches:
+      - validation/12151-8e6c3381
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PRODUCT_SHA: 8e6c3381ae8a8cb92c0221a7bd66e703c8c5be20
+    steps:
+      - name: Check out immutable product source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 2
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify exact source and initial cleanliness
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+          node --version
+          npm --version
+          df -h .
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Focused gitignore regression suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/core
+          npx vitest run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts
+
+      - name: Build CLI bundle
+        run: npm run bundle
+
+      - name: Bundled CLI glob rollover regression
+        run: node node_modules/vitest/vitest.mjs run --root ./integration-tests cli/glob-ignore-cache.test.ts --retry=0
+
+      - name: Full preflight
+        run: npm run preflight
+
+      - name: Verify exact final source and clean worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
