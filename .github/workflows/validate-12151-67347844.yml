@@ -1,0 +1,68 @@
+name: Validate PR 12156 final review fixes
+
+on:
+  push:
+    branches:
+      - validation/12151-67347844
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PRODUCT_SHA: 67347844f529b3ddda4e5816cfc9e7a101007c78
+    steps:
+      - name: Check out immutable product source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify exact source and initial cleanliness
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          node --version
+          npm --version
+          df -h .
+      - name: Install dependencies
+        run: npm ci
+      - name: Pin PR-visible no-AK wiring
+        run: npm run test:scripts -- scripts/tests/no-ak-integration-ci.test.js
+      - name: Focused cache regressions
+        run: |
+          cd packages/core
+          npx vitest run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts
+      - name: Format and diff checks
+        run: |
+          npx prettier --experimental-cli --check package.json scripts/tests/no-ak-integration-ci.test.js packages/core/src/utils/gitIgnoreParser.ts packages/core/src/utils/git-ignore-parser-cache.test.ts integration-tests/cli/glob-ignore-cache.test.ts docs/developers/development/gitignore-cache.md
+          git diff --check
+      - name: Build CLI bundle
+        run: npm run bundle
+      - name: Bundled CLI ignore semantics regression
+        run: node node_modules/vitest/vitest.mjs run --root ./integration-tests cli/glob-ignore-cache.test.ts --retry=0
+      - name: Required no-AK PR gate including glob cache regression
+        run: npm run test:integration:no-ak:sandbox:none -- --retry=0
+      - name: Full preflight
+        run: npm run preflight
+      - name: Verify exact final source and clean worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
