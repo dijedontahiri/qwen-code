@@ -3,7 +3,7 @@ name: Verify installer PR 12115 synced
 on:
   push:
     branches:
-      - ci/12115-verify-synced-20260918
+      - 'ci/12115-*'
 
 permissions:
   contents: read
