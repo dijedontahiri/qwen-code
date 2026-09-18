@@ -1,0 +1,83 @@
+name: Validate PR 12115 exact head
+
+on:
+  push:
+    branches:
+      - 'ci/12115-exact-*'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      EXPECTED_HEAD: 5c08a918732283df7ffc4a776ab8316003b41595
+      EXPECTED_BASE: 455f3d07953ff3c2fe2fbd4f0cb06d98c03af169
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/7002-glibc-preflight
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify exact PR head and synchronized base
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_head=$(git rev-parse HEAD)
+          echo "PR head: ${actual_head}"
+          test "${actual_head}" = "${EXPECTED_HEAD}"
+          git fetch --no-tags https://github.com/QwenLM/qwen-code.git main
+          upstream_head=$(git rev-parse FETCH_HEAD)
+          echo "Upstream main at validation start: ${upstream_head}"
+          echo "Expected synchronized base: ${EXPECTED_BASE}"
+          test "$(git merge-base HEAD FETCH_HEAD)" = "${EXPECTED_BASE}" || {
+            echo "PR is no longer based on the expected synchronized upstream main" >&2
+            exit 1
+          }
+
+      - name: Install repository dependencies
+        shell: bash
+        run: npm ci
+
+      - name: Run focused installer validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js
+          npm run test:scripts -- scripts/tests/install-script.test.js
+          node scripts/lint.js --shellcheck
+          npx --no-install prettier --check \
+            scripts/installation/INSTALLATION_GUIDE.md \
+            scripts/tests/install-glibc-preflight.test.js \
+            scripts/tests/install-script.test.js
+          bash -n scripts/installation/install-qwen-standalone.sh
+          git diff --check
+
+      - name: Run full repository preflight
+        shell: bash
+        run: npm run preflight
+
+      - name: Final exact-head self-audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
+          test -z "$(git status --porcelain)"
+          git diff --check
+          git fetch --no-tags https://github.com/QwenLM/qwen-code.git main
+          current_upstream=$(git rev-parse FETCH_HEAD)
+          echo "Validated PR head: $(git rev-parse HEAD)"
+          echo "Current upstream main at validation end: ${current_upstream}"
+          if [[ "${current_upstream}" != "${EXPECTED_BASE}" ]]; then
+            echo "NOTICE: upstream main advanced during validation; the tested PR head remains exact, but a later sync check is required."
+          fi
