@@ -1,0 +1,95 @@
+name: Validate issue 7002 review coverage
+
+on:
+  push:
+    branches:
+      - validation/12115-review-b70d023-20260918
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TARGET_SHA: b70d0236063a2ad2a56f7e2404f58bcc2bbcca20
+      BASELINE_SHA: 82a1c3d5600fea697eca30eec086e954d3cdd9f7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b70d0236063a2ad2a56f7e2404f58bcc2bbcca20
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+      - name: Verify immutable contribution checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASELINE_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Install repository prerequisites
+        run: npm ci
+      - name: Prove the BASE_URL negative assertion is load-bearing
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const p = 'scripts/installation/install-qwen-standalone.sh';
+          let s = fs.readFileSync(p, 'utf8');
+          const before = '    if [[ -n "${BASE_URL}" ]]; then\n        log_warning "--base-url mirrors are checked against the official standalone runtime requirement. For a custom runtime, use --archive after verifying compatibility with this host."\n    fi';
+          const after = '    log_warning "--base-url mirrors are checked against the official standalone runtime requirement. For a custom runtime, use --archive after verifying compatibility with this host."';
+          if (!s.includes(before)) throw new Error('BASE_URL guard source shape changed');
+          s = s.replace(before, after);
+          fs.writeFileSync(p, s);
+          NODE
+          set +e
+          output=$(npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -ne 0
+          grep -F "rejects glibc 2.17 before any release download" <<<"$output"
+          git checkout "$TARGET_SHA" -- scripts/installation/install-qwen-standalone.sh
+          git diff --exit-code "$TARGET_SHA" -- scripts/installation/install-qwen-standalone.sh
+      - name: Prove distro-branded GLIBC parsing coverage is load-bearing
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const p = 'scripts/installation/install-qwen-standalone.sh';
+          let s = fs.readFileSync(p, 'utf8');
+          const before = 'NR == 1 && /GNU libc|GNU C Library|GLIBC/ {';
+          const after = 'NR == 1 && /GNU libc|GNU C Library/ {';
+          if (!s.includes(before)) throw new Error('ldd parser source shape changed');
+          s = s.replace(before, after);
+          fs.writeFileSync(p, s);
+          NODE
+          set +e
+          output=$(npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -ne 0
+          grep -F "rejects an old distro-branded glibc banner via ldd" <<<"$output"
+          git checkout "$TARGET_SHA" -- scripts/installation/install-qwen-standalone.sh
+          git diff --exit-code "$TARGET_SHA" -- scripts/installation/install-qwen-standalone.sh
+      - name: Focused installer suites on candidate
+        run: npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js scripts/tests/install-script.test.js
+      - name: Shell and formatting checks
+        run: |
+          node scripts/lint.js --shellcheck
+          npx prettier --check scripts/tests/install-glibc-preflight.test.js
+          git diff --check "$BASELINE_SHA" "$TARGET_SHA"
+      - name: Full repository preflight
+        run: npm run preflight
+      - name: Audit exact candidate tree
+        run: |
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git diff --check "$TARGET_SHA"
+          git diff --exit-code "$TARGET_SHA" -- .
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
