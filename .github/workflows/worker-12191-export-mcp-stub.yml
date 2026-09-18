@@ -1,0 +1,173 @@
+name: Apply and validate issue 12185 document bridge boundary
+
+on:
+  push:
+    branches:
+      - worker/12191-export-mcp-stub-20260918
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/12185-web-shell-package-artifacts
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+      - name: Verify contribution head has not moved
+        run: test "$(git rev-parse HEAD)" = "9bc97c8629a8a0f0090a286180d647c188f419c9"
+      - name: Apply document-only MCP App bridge stub
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          build = Path('packages/web-templates/src/export-html/build.mjs')
+          text = build.read_text()
+
+          forbidden_anchor = """  {
+              pattern: /(^|\\/)node_modules\\/(codemirror|@codemirror)\\//,
+              why:
+                'A read-only export has no composer. CodeMirror last reached it through ' +
+                'three composer-tag getters that UserMessage imported from ' +
+                'hooks/useComposerCore.ts; they now live in utils/composerTag.ts, which ' +
+                'is editor-free. Import from there, not from the composer hook.',
+            },
+          ];
+          """
+          forbidden_replacement = """  {
+              pattern: /(^|\\/)node_modules\\/(codemirror|@codemirror)\\//,
+              why:
+                'A read-only export has no composer. CodeMirror last reached it through ' +
+                'three composer-tag getters that UserMessage imported from ' +
+                'hooks/useComposerCore.ts; they now live in utils/composerTag.ts, which ' +
+                'is editor-free. Import from there, not from the composer hook.',
+            },
+            {
+              pattern:
+                /(^|\\/)node_modules\\/@modelcontextprotocol\\/(ext-apps|sdk)\\//,
+              why:
+                'Interactive MCP Apps cannot initialize in document exports: ' +
+                'WebShellTranscript is rendered without mcpAppBaseUrl, so McpApp falls ' +
+                'back to its recorded text. @modelcontextprotocol/ext-apps/app-bridge ' +
+                'is resolved to src/document-mcp-app-bridge-stub.ts below.',
+            },
+          ];
+          """
+          if forbidden_anchor not in text:
+              raise SystemExit('FORBIDDEN_DOCUMENT_INPUTS anchor changed')
+          text = text.replace(forbidden_anchor, forbidden_replacement, 1)
+
+          stub_anchor = "const documentMermaidStub = join(srcDir, 'document-mermaid-stub.ts');\n"
+          stub_replacement = stub_anchor + "const documentMcpAppBridgeStub = join(\n  srcDir,\n  'document-mcp-app-bridge-stub.ts',\n);\n"
+          if text.count(stub_anchor) != 1:
+              raise SystemExit('document stub anchor changed')
+          text = text.replace(stub_anchor, stub_replacement, 1)
+
+          resolve_anchor = """    build.onResolve({ filter: /^mermaid(\\/|$)/ }, () => ({
+              path: documentMermaidStub,
+            }));
+          """
+          resolve_replacement = resolve_anchor + """    build.onResolve(
+              { filter: /^@modelcontextprotocol\\/ext-apps\\/app-bridge$/ },
+              () => ({ path: documentMcpAppBridgeStub }),
+            );
+          """
+          if text.count(resolve_anchor) != 1:
+              raise SystemExit('strip plugin resolver anchor changed')
+          text = text.replace(resolve_anchor, resolve_replacement, 1)
+          build.write_text(text)
+
+          stub = Path(
+              'packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts'
+          )
+          if stub.exists():
+              raise SystemExit(f'{stub} already exists')
+          stub.write_text("""/**
+           * @license
+           * Copyright 2026 Qwen Team
+           * SPDX-License-Identifier: Apache-2.0
+           */
+
+          /**
+           * MCP Apps are interactive and require the daemon-backed `mcpAppBaseUrl`.
+           * Exported transcript documents intentionally never provide that URL, so
+           * `McpApp` renders its recorded fallback text and this bridge is unreachable.
+           * Keep a fail-closed value stub so the document IIFE does not re-bundle the
+           * browser bridge, its MCP SDK, or their transitive dependencies.
+           */
+          export class AppBridge {
+            constructor() {
+              throw new Error(
+                'MCP App bridges are unavailable in read-only exported documents.',
+              );
+            }
+          }
+
+          export class PostMessageTransport {
+            constructor() {
+              throw new Error(
+                'MCP App transports are unavailable in read-only exported documents.',
+              );
+            }
+          }
+          """)
+          PY
+          npx prettier --experimental-cli --write \
+            packages/web-templates/src/export-html/build.mjs \
+            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts
+          git diff --check
+          git diff -- \
+            packages/web-templates/src/export-html/build.mjs \
+            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts
+      - name: Install dependencies without duplicate prepare build
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: npm ci
+      - name: Build export prerequisites
+        run: |
+          npm run build --workspace=packages/browser-use
+          npm run build --workspace=packages/core
+          npm run build --workspace=packages/acp-bridge
+          npm run build --workspace=packages/sdk-typescript
+      - name: Build and verify published web-shell package
+        run: npm run build --workspace=packages/web-shell
+      - name: Focused web-shell package-boundary regression
+        run: |
+          cd packages/web-shell
+          npx vitest run --config vitest.config.ts client/build-boundary.test.ts
+      - name: Verify document renderer stays inside its hard boundary
+        shell: bash
+        run: |
+          EXPORT_HTML_METAFILE=/tmp/export-meta.json node packages/web-templates/src/export-html/build.mjs | tee /tmp/export-build.log
+          grep -E 'Document export renderer JS is [0-9]+ bytes' /tmp/export-build.log
+          if grep -Eq 'node_modules/@modelcontextprotocol/(ext-apps|sdk)/' /tmp/export-meta.json; then
+            echo 'MCP App runtime leaked into the document renderer' >&2
+            exit 1
+          fi
+      - name: Targeted formatting and source audit
+        run: |
+          npx prettier --experimental-cli --check \
+            packages/web-templates/src/export-html/build.mjs \
+            packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts \
+            packages/web-shell/build-boundary.ts \
+            packages/web-shell/client/build-boundary.test.ts \
+            packages/web-shell/vite.lib.config.ts
+          git diff --check
+          test -z "$(git status --porcelain --untracked-files=all | grep -v '^?? packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts$' | grep -v '^ M packages/web-templates/src/export-html/build.mjs$')"
+      - name: Commit and fast-forward contribution branch
+        shell: bash
+        run: |
+          test "$(git ls-remote origin refs/heads/fix/12185-web-shell-package-artifacts | cut -f1)" = "9bc97c8629a8a0f0090a286180d647c188f419c9"
+          git config user.name "Dijedon"
+          git config user.email "99071957+dijedontahiri@users.noreply.github.com"
+          git add packages/web-templates/src/export-html/build.mjs packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts
+          git commit -m "fix(web-shell): strip MCP app bridge from document exports"
+          git push origin HEAD:fix/12185-web-shell-package-artifacts
