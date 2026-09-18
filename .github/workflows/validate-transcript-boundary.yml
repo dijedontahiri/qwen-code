@@ -1,0 +1,114 @@
+name: Validate transcript dependency boundary
+on:
+  push:
+    branches: [validation/web-shell-transcript-boundary-20260918]
+    paths: [.github/workflows/validate-transcript-boundary.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+      HEAD_SHA: 84348e46dd38611c20200639175a8b9cb530b22c
+      OLD_SHA: 095b5d781d973c06b4c0c72cb984a463a6c68253
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 84348e46dd38611c20200639175a8b9cb530b22c
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Install and build all workspaces on the exact candidate
+        id: install
+        run: |
+          mkdir -p /tmp/evidence
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          npm ci --no-audit --no-fund > /tmp/evidence/install-build.log 2>&1 || { tail -n 150 /tmp/evidence/install-build.log; exit 1; }
+          tail -n 35 /tmp/evidence/install-build.log
+      - name: Prove the boundary test and actual export fail before the fix
+        id: before
+        run: |
+          set -euo pipefail
+          helper=packages/web-shell/build-boundary.ts
+          config=packages/web-shell/vite.lib.config.ts
+          trap 'git restore -- "$helper" "$config"' EXIT
+          git show "$OLD_SHA:$helper" > "$helper"
+          git show "$OLD_SHA:$config" > "$config"
+          set +e
+          npm exec --workspace=@qwen-code/web-shell -- vitest run client/build-boundary.test.ts --coverage.enabled=false --retry=0 --reporter=json --outputFile=/tmp/evidence/before-tests.json > /tmp/evidence/before-tests.log 2>&1
+          result=$?
+          set -e
+          test "$result" -ne 0
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('/tmp/evidence/before-tests.json').read_text())
+          assert report['numTotalTests'] == 5 and report['numFailedTests'] == 1 and report['numPassedTests'] == 4, report
+          failed = [test['title'] for suite in report['testResults'] for test in suite['assertionResults'] if test['status'] == 'failed']
+          assert failed == ['preserves MCP App tree shaking in the transcript build only'], failed
+          print('Before: exactly the transcript MCP App regression fails; four controls pass.')
+          PY
+          npm exec --workspace=@qwen-code/web-shell -- vite build --config vite.lib.config.ts --mode transcript > /tmp/evidence/before-transcript.log 2>&1
+          set +e
+          node packages/web-templates/src/export-html/build.mjs > /tmp/evidence/before-export.log 2>&1
+          result=$?
+          set -e
+          test "$result" -ne 0
+          grep -F 'expected <= 1930000' /tmp/evidence/before-export.log
+          tail -n 22 /tmp/evidence/before-export.log
+      - name: Prove corrected tests and unchanged export budget pass
+        id: after
+        run: |
+          npm exec --workspace=@qwen-code/web-shell -- vitest run client/build-boundary.test.ts --coverage.enabled=false --retry=0 --reporter=json --outputFile=/tmp/evidence/after-tests.json > /tmp/evidence/after-tests.log 2>&1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('/tmp/evidence/after-tests.json').read_text())
+          assert report['success'] and report['numTotalTests'] == 5 and report['numPassedTests'] == 5 and report['numFailedTests'] == 0, report
+          print('After: all five package-boundary tests pass.')
+          PY
+          npm exec --workspace=@qwen-code/web-shell -- vite build --config vite.lib.config.ts --mode transcript > /tmp/evidence/after-transcript.log 2>&1
+          EXPORT_HTML_METAFILE=/tmp/evidence/after-export-metafile.json node packages/web-templates/src/export-html/build.mjs > /tmp/evidence/after-export.log 2>&1
+          tail -n 22 /tmp/evidence/after-export.log
+      - name: Verify emitted declarations, publication guard, and package contents
+        run: |
+          npm exec --workspace=@qwen-code/web-shell -- tsc -p tsconfig.lib.json
+          set +e
+          node packages/web-shell/scripts/verify-package.mjs > /tmp/evidence/before-alias-rewrite.log 2>&1
+          result=$?
+          set -e
+          test "$result" -ne 0
+          grep -F '@/' /tmp/evidence/before-alias-rewrite.log
+          node packages/web-shell/scripts/rewrite-declaration-aliases.mjs
+          npm run verify:package --workspace=@qwen-code/web-shell
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          npm pack --workspace=@qwen-code/web-shell --dry-run --json > /tmp/evidence/package-contents.json
+          node -e "const p=require('/tmp/evidence/package-contents.json'); if(!Array.isArray(p)||!p[0]?.files?.length) process.exit(1); console.log('Verified package contains',p[0].files.length,'files')"
+      - name: Complete Web Shell tests and TypeScript checks
+        if: always() && steps.install.outcome == 'success'
+        run: |
+          npm run test:ci --workspace=@qwen-code/web-shell > /tmp/evidence/web-shell-tests.log 2>&1 || { tail -n 160 /tmp/evidence/web-shell-tests.log; exit 1; }
+          grep -E 'Test Files|Tests |Duration' /tmp/evidence/web-shell-tests.log | tail -n 12
+          npm exec --workspace=@qwen-code/web-shell -- tsc --noEmit > /tmp/evidence/web-shell-types.log 2>&1 || { tail -n 120 /tmp/evidence/web-shell-types.log; exit 1; }
+      - name: Changed-file lint, formatting, and final clean-head audit
+        if: always() && steps.install.outcome == 'success'
+        run: |
+          npm exec -- prettier --check packages/web-shell/build-boundary.ts packages/web-shell/client/build-boundary.test.ts packages/web-shell/vite.lib.config.ts .qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md
+          npm exec -- eslint packages/web-shell/build-boundary.ts packages/web-shell/client/build-boundary.test.ts packages/web-shell/vite.lib.config.ts > /tmp/evidence/lint.log 2>&1 || { cat /tmp/evidence/lint.log; exit 1; }
+          git diff --check
+          git diff --exit-code
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git diff --name-only e596a410bbd58313b6db069eed1cbb33bd3dbd8f HEAD | wc -l)" -eq 7
+          test "$(git diff --name-only "$OLD_SHA" HEAD | wc -l)" -eq 4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: transcript-boundary-validation
+          path: /tmp/evidence
+          retention-days: 14
+          if-no-files-found: error
