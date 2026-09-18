@@ -1,0 +1,73 @@
+name: Issue 12151 final current-main validation
+on:
+  push:
+    branches: [validation/12151-final-e596-20260918]
+permissions:
+  contents: read
+env:
+  CI: 'true'
+  CANDIDATE_SHA: af0421d5d4205a78aabaacff4737d8063fe45b3e
+  BASE_SHA: e596a410bbd58313b6db069eed1cbb33bd3dbd8f
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: af0421d5d4205a78aabaacff4737d8063fe45b3e
+          fetch-depth: 12
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify exact contribution and five-file scope
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          cat > "$RUNNER_TEMP/expected.txt" <<'EOF'
+          docs/developers/development/_meta.ts
+          docs/developers/development/gitignore-cache.md
+          integration-tests/cli/glob-ignore-cache.test.ts
+          packages/core/src/utils/git-ignore-parser-cache.test.ts
+          packages/core/src/utils/gitIgnoreParser.ts
+          EOF
+          sort -o "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/expected.txt"
+          git diff --name-only "$BASE_SHA" HEAD | sort > "$RUNNER_TEMP/actual.txt"
+          diff -u "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/actual.txt"
+          git diff --check "$BASE_SHA" HEAD
+      - name: Install and build
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Preserve no-key integration contract
+        run: npm run test:scripts -- scripts/tests/no-ak-integration-ci.test.js
+      - name: Focused parser regressions
+        run: |
+          set -euo pipefail
+          cd packages/core
+          npx vitest run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts --maxWorkers=1
+      - name: Bundle and run real CLI regression
+        env:
+          QWEN_SANDBOX: 'false'
+          QWEN_DEBUG_LOG_FILE: '0'
+        run: |
+          set -euo pipefail
+          npm run bundle
+          node node_modules/vitest/vitest.mjs run --root ./integration-tests cli/glob-ignore-cache.test.ts --retry=0
+      - name: Full repository preflight
+        run: npm run preflight
+      - name: Verify exact tested head and clean worktree
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --check
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          printf 'Exact candidate: %s\nBase: %s\nFocused parser/CLI checks and full preflight passed.\n' "$CANDIDATE_SHA" "$BASE_SHA" >> "$GITHUB_STEP_SUMMARY"
