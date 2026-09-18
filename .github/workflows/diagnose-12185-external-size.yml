@@ -23,6 +23,7 @@ jobs:
         run: |
           npm run build --workspace=packages/browser-use
           npm run build --workspace=packages/core
+          npm run build --workspace=packages/acp-bridge
           npm run build --workspace=packages/sdk-typescript
       - name: Measure export renderer for each newly externalized dependency
         shell: bash
