@@ -171,13 +171,15 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
+    // Document-only dependency bundling must never enter the published entries.
+    outDir: mode === 'document-export' ? 'dist/document-export' : 'dist',
     // Keep the library and app on one syntax floor. Runtime packages are
     // externalized below, while package-owned output and the transcript entry
     // still need a stable target for npm consumers.
     target: WEB_SHELL_BUILD_TARGET,
     lib: {
       entry:
-        mode === 'transcript'
+        mode === 'transcript' || mode === 'document-export'
           ? { transcript: 'client/transcript.ts' }
           : {
               index: 'client/index.tsx',
@@ -187,7 +189,8 @@ export default defineConfig(({ mode }) => ({
       fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
-      external: shouldExternalizeWebShellDependency,
+      external: (id) =>
+        shouldExternalizeWebShellDependency(id, mode === 'document-export'),
     },
   },
   define: {

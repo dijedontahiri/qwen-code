@@ -6,4 +6,4 @@
 
 // esbuild supplies platform-native absolute paths to plugin callbacks.
 export const TRANSCRIPT_CSS_ENTRY_FILTER =
-  /web-shell[\\/]dist[\\/]transcript\.js$/;
+  /web-shell[\\/]dist[\\/](?:document-export[\\/])?transcript\.js$/;

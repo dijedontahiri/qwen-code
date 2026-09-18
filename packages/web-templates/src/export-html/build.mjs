@@ -249,6 +249,21 @@ if (
 
 const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
+  // The public transcript keeps shared dependencies external. Its private
+  // build preserves tree shaking for this standalone renderer without
+  // publishing a duplicate MCP App instance to package consumers.
+  alias: {
+    '@qwen-code/web-shell/transcript': join(
+      assetsDir,
+      '..',
+      '..',
+      '..',
+      'web-shell',
+      'dist',
+      'document-export',
+      'transcript.js',
+    ),
+  },
   bundle: true,
   minify: true,
   write: false,

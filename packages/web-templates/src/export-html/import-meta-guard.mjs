@@ -12,7 +12,8 @@
 // DaemonWorkspaceProvider.tsx's guarded module-copy id, which arrives via the
 // prebuilt web-shell transcript bundle.
 
-const TOLERATED_BUNDLE = /web-shell[/\\]dist[/\\]transcript\.js$/;
+const TOLERATED_BUNDLE =
+  /web-shell[/\\]dist[/\\](?:document-export[/\\])?transcript\.js$/;
 
 // The deliberate read is one ternary
 // (`typeof import.meta.url === 'string' && import.meta.url ? … : …`), and

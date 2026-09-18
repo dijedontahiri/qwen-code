@@ -38,6 +38,7 @@ const prebuiltTranscript = path.join(
   'packages',
   'web-shell',
   'dist',
+  'document-export',
   'transcript.js',
 );
 
@@ -158,3 +159,40 @@ describe.skipIf(!hasPrebuiltTranscript)(
     });
   },
 );
+
+describe('private document transcript import.meta guard', () => {
+  const at = (file) => ({
+    id: 'empty-import-meta',
+    location: { file, line: 1, column: 1 },
+  });
+  it.each([
+    'packages/web-shell/dist/document-export/transcript.js',
+    'C:\\repo\\packages\\web-shell\\dist\\document-export\\transcript.js',
+  ])('retains the exact three-read limit for %s', (file) => {
+    const warnings = Array.from(
+      { length: TOLERATED_TRANSCRIPT_IMPORT_META_READS },
+      () => at(file),
+    );
+    expect(findUnexpectedImportMeta(warnings)).toEqual([]);
+    expect(findUnexpectedImportMeta([...warnings, at(file)])).toHaveLength(1);
+  });
+  it('does not allow other private-output files', () => {
+    expect(
+      findUnexpectedImportMeta([
+        at('packages/web-shell/dist/document-export/index.js'),
+      ]),
+    ).toHaveLength(1);
+  });
+  it('does not reset the read limit between public and private entries', () => {
+    const warnings = Array.from(
+      { length: TOLERATED_TRANSCRIPT_IMPORT_META_READS },
+      () => at('packages/web-shell/dist/transcript.js'),
+    );
+    expect(
+      findUnexpectedImportMeta([
+        ...warnings,
+        at('packages/web-shell/dist/document-export/transcript.js'),
+      ]),
+    ).toHaveLength(1);
+  });
+});

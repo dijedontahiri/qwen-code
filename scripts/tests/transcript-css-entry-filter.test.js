@@ -43,3 +43,19 @@ describe('transcript CSS entry filter', () => {
     ).toBe(false);
   });
 });
+
+describe('private document transcript CSS entry filter', () => {
+  it.each([
+    '/repo/packages/web-shell/dist/document-export/transcript.js',
+    'C:\\repo\\packages\\web-shell\\dist\\document-export\\transcript.js',
+  ])('matches the isolated transcript at %s', (file) => {
+    expect(TRANSCRIPT_CSS_ENTRY_FILTER.test(file)).toBe(true);
+  });
+  it.each([
+    '/repo/packages/web-shell/dist/document-export/index.js',
+    '/repo/packages/web-shell/dist/document-export/nested/transcript.js',
+    '/repo/packages/web-shell/dist/document-export/transcript.js.map',
+  ])('still rejects non-entry files at %s', (file) => {
+    expect(TRANSCRIPT_CSS_ENTRY_FILTER.test(file)).toBe(false);
+  });
+});
