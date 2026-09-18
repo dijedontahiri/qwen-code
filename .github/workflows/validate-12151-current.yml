@@ -1,0 +1,85 @@
+name: Issue 12151 current-head validation
+on:
+  push:
+    branches: [validation/12151-current-20260918]
+permissions:
+  contents: read
+env:
+  CI: 'true'
+  CANDIDATE_SHA: 646a185deb1c19d091e2c0baeef4811c2a2aa82a
+  BASE_SHA: 1ef024ebf1f7564c88923d98e3ad2fec52809d3d
+jobs:
+  preflight-and-cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 646a185deb1c19d091e2c0baeef4811c2a2aa82a
+          fetch-depth: 10
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify exact contribution and six-file scope
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          printf '%s\n' \
+            docs/developers/development/_meta.ts \
+            docs/developers/development/gitignore-cache.md \
+            integration-tests/glob-ignore-cache.test.ts \
+            package.json \
+            packages/core/src/utils/git-ignore-parser-cache.test.ts \
+            packages/core/src/utils/gitIgnoreParser.ts \
+            | sort > "$RUNNER_TEMP/expected-files.txt"
+          git diff --name-only "$BASE_SHA" HEAD | sort > "$RUNNER_TEMP/actual-files.txt"
+          diff -u "$RUNNER_TEMP/expected-files.txt" "$RUNNER_TEMP/actual-files.txt"
+          git diff --check "$BASE_SHA" HEAD
+          node --version
+          npm --version
+      - name: Bootstrap dependencies required by the clean script
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Full repository preflight
+        run: |
+          set -euo pipefail
+          npm run preflight 2>&1 | tee "$RUNNER_TEMP/qwen-12151-preflight.log"
+      - name: Build the actual CLI bundle
+        run: |
+          set -euo pipefail
+          npm run bundle 2>&1 | tee "$RUNNER_TEMP/qwen-12151-bundle.log"
+      - name: Real CLI sparse-glob E2E without retries
+        env:
+          QWEN_SANDBOX: 'false'
+          QWEN_DEBUG_LOG_FILE: '0'
+        run: |
+          set -euo pipefail
+          node node_modules/vitest/vitest.mjs run --root ./integration-tests glob-ignore-cache.test.ts --retry=0 2>&1 | tee "$RUNNER_TEMP/qwen-12151-cli-e2e.log"
+      - name: Exercise no-key CI registration
+        env:
+          QWEN_SANDBOX: 'false'
+        run: |
+          set -euo pipefail
+          npm run test:integration:no-ak:sandbox:none -- --retry=0 glob-ignore-cache.test.ts 2>&1 | tee "$RUNNER_TEMP/qwen-12151-no-key.log"
+      - name: Verify unchanged tested head and clean worktree
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --check
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          printf 'Exact contribution tested: %s\nBase: %s\nFull preflight, bundle, CLI E2E, and no-key registration passed.\n' "$CANDIDATE_SHA" "$BASE_SHA" | tee "$RUNNER_TEMP/qwen-12151-summary.txt" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: issue-12151-current-head-validation
+          path: |
+            ${{ runner.temp }}/qwen-12151-*.log
+            ${{ runner.temp }}/qwen-12151-summary.txt
+          retention-days: 14
+          if-no-files-found: warn
