@@ -21,6 +21,7 @@ jobs:
         run: npm ci
       - name: Build workspace prerequisites used by export renderer
         run: |
+          npm run build --workspace=packages/browser-use
           npm run build --workspace=packages/core
           npm run build --workspace=packages/sdk-typescript
       - name: Measure export renderer for each newly externalized dependency
