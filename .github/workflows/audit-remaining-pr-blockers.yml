@@ -1,0 +1,134 @@
+name: Audit remaining PR blockers
+on:
+  push:
+    branches: [audit/remaining-pr-blockers-20260918]
+    paths: [.github/workflows/audit-remaining-pr-blockers.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  export-boundary:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: e596a410bbd58313b6db069eed1cbb33bd3dbd8f
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install and build the unchanged upstream base
+        run: |
+          mkdir -p /tmp/evidence
+          test "$(git rev-parse HEAD)" = e596a410bbd58313b6db069eed1cbb33bd3dbd8f
+          npm ci --no-audit --no-fund > /tmp/evidence/base-install.log 2>&1 || { tail -n 140 /tmp/evidence/base-install.log; exit 1; }
+          tail -n 40 /tmp/evidence/base-install.log
+      - name: Compare dependency boundaries without weakening the export budget
+        run: |
+          set -euo pipefail
+          export EXPORT_HTML_METAFILE=/tmp/evidence/base-metafile.json
+          node packages/web-templates/src/export-html/build.mjs > /tmp/evidence/base-export.log 2>&1
+          git checkout --detach 095b5d781d973c06b4c0c72cb984a463a6c68253
+          test "$(git rev-parse HEAD)" = 095b5d781d973c06b4c0c72cb984a463a6c68253
+          for variant in head bundle-ext-apps bundle-react-virtual bundle-both; do
+            git restore packages/web-shell/build-boundary.ts
+            VARIANT="$variant" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          variant = os.environ['VARIANT']
+          path = Path('packages/web-shell/build-boundary.ts')
+          source = path.read_text()
+          excluded = []
+          if variant in ('bundle-ext-apps', 'bundle-both'):
+              excluded.append('@modelcontextprotocol/ext-apps')
+          if variant in ('bundle-react-virtual', 'bundle-both'):
+              excluded.append('@tanstack/react-virtual')
+          source += ''.join(f'\nruntimePackages.delete({package!r});\n' for package in excluded)
+          path.write_text(source)
+          PY
+            npm exec --workspace @qwen-code/web-shell -- vite build --config vite.lib.config.ts --mode transcript > "/tmp/evidence/$variant-transcript.log" 2>&1
+            set +e
+            EXPORT_HTML_METAFILE="/tmp/evidence/$variant-metafile.json" node packages/web-templates/src/export-html/build.mjs > "/tmp/evidence/$variant-export.log" 2>&1
+            status=$?
+            set -e
+            echo "$variant exit=$status"
+            echo "$status" > "/tmp/evidence/$variant-exit.txt"
+            tail -n 24 "/tmp/evidence/$variant-export.log"
+          done
+          git restore packages/web-shell/build-boundary.ts
+          git diff --exit-code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: export-boundary-differential
+          path: /tmp/evidence
+          retention-days: 14
+          if-no-files-found: error
+  git-canary:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: af0421d5d4205a78aabaacff4737d8063fe45b3e
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+      - name: Extract the exact-head preflight failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/evidence
+          python3 - <<'PY'
+          import os, re, urllib.request
+          from pathlib import Path
+          request = urllib.request.Request('https://api.github.com/repos/dijedontahiri/qwen-code/actions/jobs/105599348999/logs', headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'User-Agent':'contribution-failure-audit'})
+          with urllib.request.urlopen(request, timeout=60) as response:
+              log = re.sub(r'\x1b\[[0-9;]*m', '', response.read().decode('utf-8-sig', errors='replace'))
+          Path('/tmp/evidence/exact-head-preflight.log').write_text(log)
+          lines = log.splitlines()
+          for i,line in enumerate(lines):
+              if re.search(r'Failed Tests| FAIL |AssertionError|Error:.*expected|Process completed with exit',line):
+                  print('\n'.join(lines[max(0,i-3):min(len(lines),i+24)]))
+          PY
+      - name: Install exact current head without modifying its tests
+        run: |
+          test "$(git rev-parse HEAD)" = af0421d5d4205a78aabaacff4737d8063fe45b3e
+          npm ci --no-audit --no-fund > /tmp/evidence/install.log 2>&1 || { tail -n 120 /tmp/evidence/install.log; exit 1; }
+      - name: Run the same security canary three times on head and upstream
+        run: |
+          set -euo pipefail
+          git --version | tee /tmp/evidence/git-version.txt
+          for ref in af0421d5d4205a78aabaacff4737d8063fe45b3e e596a410bbd58313b6db069eed1cbb33bd3dbd8f; do
+            git checkout --detach "$ref"
+            for iteration in 1 2 3; do
+              set +e
+              npm exec --workspace @qwen-code/qwen-code-core -- vitest run src/utils/git-config-exec.canary.test.ts --maxWorkers=1 --retry=0 > "/tmp/evidence/canary-$ref-$iteration.log" 2>&1
+              status=$?
+              set -e
+              echo "$ref iteration=$iteration exit=$status"
+              echo "$status" > "/tmp/evidence/canary-$ref-$iteration-exit.txt"
+              tail -n 48 "/tmp/evidence/canary-$ref-$iteration.log"
+            done
+          done
+          git checkout --detach af0421d5d4205a78aabaacff4737d8063fe45b3e
+          git diff --exit-code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: git-canary-differential
+          path: /tmp/evidence
+          retention-days: 14
+          if-no-files-found: error
