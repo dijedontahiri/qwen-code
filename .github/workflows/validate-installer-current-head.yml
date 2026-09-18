@@ -1,0 +1,68 @@
+name: Validate synchronized installer contribution
+on:
+  push:
+    branches: [validation/installer-exact-82a1c3d-20260918]
+    paths: [.github/workflows/validate-installer-current-head.yml]
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      CI: 'true'
+      EXPECTED_HEAD: 82a1c3d5600fea697eca30eec086e954d3cdd9f7
+      EXPECTED_BASE: 377a5753a73fb04977c629c835a9f8bbff42848b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 82a1c3d5600fea697eca30eec086e954d3cdd9f7
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Verify exact contribution head and five-file scope
+        run: |
+          mkdir -p /tmp/evidence
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git merge-base --is-ancestor "$EXPECTED_BASE" HEAD
+          git diff --name-only "$EXPECTED_BASE" HEAD > /tmp/evidence/changed-files.txt
+          test "$(wc -l < /tmp/evidence/changed-files.txt)" -eq 5
+          git diff --check "$EXPECTED_BASE" HEAD
+          git rev-parse HEAD > /tmp/evidence/source-sha.txt
+      - name: Install repository dependencies and prepare workspaces
+        id: install
+        run: |
+          npm ci --no-audit --no-fund > /tmp/evidence/install.log 2>&1 || { tail -n 160 /tmp/evidence/install.log; exit 1; }
+          tail -n 30 /tmp/evidence/install.log
+      - name: Focused installer regression suites
+        run: |
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js scripts/tests/install-script.test.js > /tmp/evidence/installer-tests.log 2>&1 || { tail -n 180 /tmp/evidence/installer-tests.log; exit 1; }
+          tail -n 40 /tmp/evidence/installer-tests.log
+      - name: Shell, formatting, and whitespace checks
+        run: |
+          node scripts/lint.js --shellcheck > /tmp/evidence/shellcheck.log 2>&1 || { cat /tmp/evidence/shellcheck.log; exit 1; }
+          npm exec -- prettier --check scripts/installation/INSTALLATION_GUIDE.md scripts/tests/install-glibc-preflight.test.js scripts/tests/install-script.test.js
+          bash -n scripts/installation/install-qwen-standalone.sh
+          git diff --check
+      - name: Complete repository preflight without retries or exclusions
+        run: |
+          npm run preflight > /tmp/evidence/preflight.log 2>&1 || { tail -n 200 /tmp/evidence/preflight.log; exit 1; }
+          tail -n 60 /tmp/evidence/preflight.log
+      - name: Final exact-head and clean-worktree audit
+        if: always() && steps.install.outcome == 'success'
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git diff --exit-code
+          git diff --cached --exit-code
+          git diff --check "$EXPECTED_BASE" HEAD
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: synchronized-installer-evidence
+          path: /tmp/evidence
+          retention-days: 14
+          if-no-files-found: error
