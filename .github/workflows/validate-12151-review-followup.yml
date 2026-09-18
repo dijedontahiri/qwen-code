@@ -39,12 +39,12 @@ jobs:
           free -m
       - name: Bootstrap dependencies required by the clean script
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Focused parser regressions
-        run: npm test --workspace @qwen-code/qwen-code-core -- src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts
       - name: Full repository preflight
         run: |
           set -euo pipefail
           npm run preflight 2>&1 | tee "$RUNNER_TEMP/qwen-12151-review-preflight.log"
+      - name: Focused parser regressions after build
+        run: npm test --workspace @qwen-code/qwen-code-core -- src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts
       - name: Build the actual CLI bundle
         run: |
           set -euo pipefail
@@ -63,7 +63,7 @@ jobs:
           git diff --check
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
-          printf 'Exact contribution tested: %s\nBase: %s\nFull preflight and real CLI E2E passed.\n' "$CANDIDATE_SHA" "$BASE_SHA" | tee "$RUNNER_TEMP/qwen-12151-review-summary.txt" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Exact contribution tested: %s\nBase: %s\nFull preflight, focused regressions, and real CLI E2E passed.\n' "$CANDIDATE_SHA" "$BASE_SHA" | tee "$RUNNER_TEMP/qwen-12151-review-summary.txt" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
