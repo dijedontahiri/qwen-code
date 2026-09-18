@@ -1,0 +1,144 @@
+name: Validate PR 12191 candidate f17370c
+on:
+  push:
+    branches: [validation/12191-f17370c-20260918-r9]
+    paths: [.github/workflows/validate-12191-f17370c.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CI: 'true'
+      SOURCE_SHA: f17370c06965f27d6b82ec14fbae855293f83f93
+      PR_PARENT_SHA: eb48b52da82a60341fd4a3b42a2d7410aa734ad7
+    steps:
+      - name: Check out immutable product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: f17370c06965f27d6b82ec14fbae855293f83f93
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Verify exact fast-forward candidate and clean source
+        run: |
+          mkdir -p /tmp/evidence /tmp/packs
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$PR_PARENT_SHA" HEAD
+          test "$(git rev-list --count "$PR_PARENT_SHA"..HEAD)" = 2
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PR_PARENT_SHA" HEAD
+          git diff --name-status "$PR_PARENT_SHA" HEAD | tee /tmp/evidence/candidate-files.txt
+      - name: Install locked dependencies
+        run: |
+          npm ci --no-audit --no-fund > /tmp/evidence/npm-ci.log 2>&1 || { tail -n 180 /tmp/evidence/npm-ci.log; exit 1; }
+          node --version | tee /tmp/evidence/node-version.txt
+          npm --version | tee /tmp/evidence/npm-version.txt
+      - name: Build SDK and Web Shell exact candidate
+        run: |
+          npm run build --workspace=@qwen-code/sdk > /tmp/evidence/sdk-build.log 2>&1 || { tail -n 180 /tmp/evidence/sdk-build.log; exit 1; }
+          npm run build --workspace=@qwen-code/web-shell > /tmp/evidence/web-shell-build.log 2>&1 || { tail -n 220 /tmp/evidence/web-shell-build.log; exit 1; }
+          npm run verify:package --workspace=@qwen-code/web-shell
+      - name: Prove declaration guard fails before alias rewrite and passes after
+        run: |
+          npm exec --workspace=@qwen-code/web-shell -- tsc -p tsconfig.lib.json
+          set +e
+          node packages/web-shell/scripts/verify-package.mjs > /tmp/evidence/declaration-negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F 'repository-only @/ import leaked' /tmp/evidence/declaration-negative.log
+          node packages/web-shell/scripts/rewrite-declaration-aliases.mjs
+          npm run verify:package --workspace=@qwen-code/web-shell
+      - name: Run Web Shell boundary, DOM fallback, full package tests, types and lint
+        run: |
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-boundary.test.ts client/components/messages/McpApp.document.dom.test.tsx --coverage.enabled=false --retry=0
+          npm run test:ci --workspace=@qwen-code/web-shell > /tmp/evidence/web-shell-tests.log 2>&1 || { tail -n 220 /tmp/evidence/web-shell-tests.log; exit 1; }
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell
+          npm run format:check --workspace=@qwen-code/web-shell
+      - name: Prove previous document boundary exceeds budget and candidate passes unchanged budget
+        run: |
+          source=packages/web-templates/src/export-html/build.mjs
+          cp "$source" /tmp/evidence/candidate-build.mjs
+          trap 'cp /tmp/evidence/candidate-build.mjs "$source"' EXIT
+          git show "$PR_PARENT_SHA:$source" > "$source"
+          set +e
+          node "$source" > /tmp/evidence/document-negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F 'expected <= 1930000' /tmp/evidence/document-negative.log
+          cp /tmp/evidence/candidate-build.mjs "$source"
+          EXPORT_HTML_METAFILE=/tmp/evidence/document-metafile.json node "$source" > /tmp/evidence/document-positive.log 2>&1 || { tail -n 180 /tmp/evidence/document-positive.log; exit 1; }
+          tail -n 40 /tmp/evidence/document-positive.log
+          npm run test:scripts -- scripts/tests/transcript-css-entry-filter.test.js scripts/tests/export-html-import-meta-guard.test.js > /tmp/evidence/export-guards.log 2>&1 || { tail -n 180 /tmp/evidence/export-guards.log; exit 1; }
+      - name: Pack artifacts and verify external consumer and symlink resolution
+        run: |
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          npm pack --workspace=@qwen-code/sdk --json --pack-destination /tmp/packs > /tmp/evidence/sdk-pack.json
+          npm pack --workspace=@qwen-code/web-shell --json --pack-destination /tmp/packs > /tmp/evidence/web-shell-pack.json
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          const info = JSON.parse(fs.readFileSync('/tmp/evidence/web-shell-pack.json', 'utf8'))[0];
+          if (!info?.files?.length) throw new Error('web-shell pack produced no file list');
+          if (info.files.some((f) => f.path.includes('document-mcp-app-bridge-stub') || f.path.startsWith('dist/document-export/'))) {
+            throw new Error('document-only implementation leaked into published artifact');
+          }
+          const required = ['dist/index.js','dist/transcript.js','dist/daemon-react-sdk.js','dist/types/index.d.ts','dist/types/transcript.d.ts','dist/types/daemon-react-sdk.d.ts'];
+          for (const file of required) if (!info.files.some((f) => f.path === file)) throw new Error(`missing packed export ${file}`);
+          JS
+          sdk_tgz=$(find /tmp/packs -maxdepth 1 -name 'qwen-code-sdk-*.tgz' -print -quit)
+          web_tgz=$(find /tmp/packs -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)
+          test -n "$sdk_tgz" && test -n "$web_tgz"
+          mkdir -p /tmp/web-shell-consumer
+          cd /tmp/web-shell-consumer
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$sdk_tgz" "$web_tgz" react@19.2.0 react-dom@19.0.0 >/tmp/evidence/consumer-install.log 2>&1 || { tail -n 160 /tmp/evidence/consumer-install.log; exit 1; }
+          cat > index.ts <<'TS'
+          import * as WebShell from '@qwen-code/web-shell';
+          import * as Transcript from '@qwen-code/web-shell/transcript';
+          import * as DaemonReactSdk from '@qwen-code/web-shell/daemon-react-sdk';
+          void [WebShell, Transcript, DaemonReactSdk];
+          TS
+          cat > tsconfig.json <<'JSON'
+          {"compilerOptions":{"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext","jsx":"react-jsx","strict":true,"noEmit":true,"skipLibCheck":false},"include":["index.ts"]}
+          JSON
+          node "$GITHUB_WORKSPACE/node_modules/typescript/bin/tsc" -p tsconfig.json
+          node "$GITHUB_WORKSPACE/node_modules/esbuild/bin/esbuild" index.ts --bundle --platform=browser --format=esm --outfile=/tmp/evidence/consumer-bundle.js >/tmp/evidence/consumer-bundle.log 2>&1
+          mkdir -p /tmp/web-shell-symlink/node_modules/@qwen-code
+          cp index.ts tsconfig.json /tmp/web-shell-symlink/
+          ln -s /tmp/web-shell-consumer/node_modules/@qwen-code/web-shell /tmp/web-shell-symlink/node_modules/@qwen-code/web-shell
+          ln -s /tmp/web-shell-consumer/node_modules/@qwen-code/sdk /tmp/web-shell-symlink/node_modules/@qwen-code/sdk
+          ln -s /tmp/web-shell-consumer/node_modules/react /tmp/web-shell-symlink/node_modules/react
+          ln -s /tmp/web-shell-consumer/node_modules/react-dom /tmp/web-shell-symlink/node_modules/react-dom
+          cd /tmp/web-shell-symlink
+          node "$GITHUB_WORKSPACE/node_modules/typescript/bin/tsc" -p tsconfig.json
+      - name: Full repository preflight
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          npm run preflight > /tmp/evidence/preflight.log 2>&1 || { tail -n 260 /tmp/evidence/preflight.log; exit 1; }
+          tail -n 80 /tmp/evidence/preflight.log
+      - name: Verify exact final source and clean nonignored worktree
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PR_PARENT_SHA" HEAD
+      - name: Preserve validation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr-12191-f17370c-evidence
+          path: /tmp/evidence
+          retention-days: 14
+          if-no-files-found: warn
