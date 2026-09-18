@@ -1,0 +1,137 @@
+name: Issue 12185 web-shell package validation
+on:
+  push:
+    branches: [validation/12185-web-shell-package-v2-20260918]
+permissions:
+  contents: read
+env:
+  CI: 'true'
+  CANDIDATE_SHA: 9889f2541910a215cb45f89270c1984405326da2
+  BASE_SHA: ab47e38197fca54a8aa1969862cce9c0049666d5
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 9889f2541910a215cb45f89270c1984405326da2
+          fetch-depth: 8
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify exact candidate and scope
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          cat > "$RUNNER_TEMP/expected.txt" <<'EOF'
+          packages/web-shell/build-boundary.ts
+          packages/web-shell/client/build-boundary.test.ts
+          packages/web-shell/client/components/ui/alert-dialog.tsx
+          packages/web-shell/client/components/ui/field.tsx
+          packages/web-shell/client/components/ui/toggle-group.tsx
+          packages/web-shell/package.json
+          packages/web-shell/scripts/verify-package.mjs
+          packages/web-shell/vite.lib.config.ts
+          EOF
+          sort -o "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/expected.txt"
+          git diff --name-only "$BASE_SHA" HEAD | sort > "$RUNNER_TEMP/actual.txt"
+          diff -u "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/actual.txt"
+          git diff --check "$BASE_SHA" HEAD
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build package and run publish guards
+        run: |
+          set -euo pipefail
+          npm run build --workspace @qwen-code/web-shell 2>&1 | tee "$RUNNER_TEMP/qwen-12185-build.log"
+          npm run prepublishOnly --workspace @qwen-code/web-shell 2>&1 | tee "$RUNNER_TEMP/qwen-12185-publish-guard.log"
+      - name: Focused package-boundary regression
+        run: |
+          set -euo pipefail
+          cd packages/web-shell
+          npx vitest run --config vitest.config.ts build-boundary.test.ts 2>&1 | tee "$RUNNER_TEMP/qwen-12185-boundary.log"
+      - name: Inspect built package contract
+        run: |
+          set -euo pipefail
+          ! grep -R -n -E "['\"]@/" packages/web-shell/dist/types
+          for target in \
+            dist/index.js \
+            dist/daemon-react-sdk.js \
+            dist/transcript.js \
+            dist/types/index.d.ts \
+            dist/types/daemon-react-sdk.d.ts \
+            dist/types/transcript.d.ts; do
+            test -f "packages/web-shell/$target"
+          done
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const js = [
+            'packages/web-shell/dist/index.js',
+            'packages/web-shell/dist/daemon-react-sdk.js',
+            'packages/web-shell/dist/transcript.js',
+          ].map((file) => readFileSync(file, 'utf8')).join('\n');
+          for (const dependency of [
+            '@xterm/xterm',
+            '@xterm/addon-fit',
+            '@tanstack/react-table',
+            '@tanstack/react-virtual',
+            'fzf',
+            '@modelcontextprotocol/ext-apps',
+          ]) {
+            if (!js.includes(dependency)) {
+              throw new Error(`expected external import for ${dependency}`);
+            }
+          }
+          NODE
+      - name: Prove declaration guard catches the original defect
+        run: |
+          set -euo pipefail
+          file=packages/web-shell/client/components/ui/field.tsx
+          cp "$file" "$RUNNER_TEMP/field.tsx"
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('packages/web-shell/client/components/ui/field.tsx')
+          text = path.read_text()
+          old = "import { Label } from './label';"
+          new = "import { Label } from '@/components/ui/label';"
+          assert old in text
+          path.write_text(text.replace(old, new, 1))
+          PY
+          (cd packages/web-shell && npx tsc -p tsconfig.lib.json)
+          set +e
+          node packages/web-shell/scripts/verify-package.mjs > "$RUNNER_TEMP/qwen-12185-mutation.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -q 'repository-only @/ import leaked' "$RUNNER_TEMP/qwen-12185-mutation.log"
+          cp "$RUNNER_TEMP/field.tsx" "$file"
+          (cd packages/web-shell && npx tsc -p tsconfig.lib.json)
+          node packages/web-shell/scripts/verify-package.mjs
+      - name: Restore generated state and run full preflight
+        run: |
+          set -euo pipefail
+          git checkout -- packages/web-shell/client/components/ui/field.tsx
+          npm run preflight 2>&1 | tee "$RUNNER_TEMP/qwen-12185-preflight.log"
+      - name: Verify unchanged tested head and clean worktree
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --check
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          printf 'Candidate: %s\nBase: %s\nPackage build, publish guard, focused regression, mutation proof and full preflight passed.\n' "$CANDIDATE_SHA" "$BASE_SHA" | tee "$RUNNER_TEMP/qwen-12185-summary.txt" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: issue-12185-web-shell-package-validation
+          path: |
+            ${{ runner.temp }}/qwen-12185-*.log
+            ${{ runner.temp }}/qwen-12185-summary.txt
+          retention-days: 14
+          if-no-files-found: warn
