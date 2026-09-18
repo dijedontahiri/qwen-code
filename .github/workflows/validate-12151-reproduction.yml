@@ -1,0 +1,35 @@
+name: Issue 12151 isolated reproduction
+on:
+  push:
+    branches: [validation/12151-reproduction]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QwenLM/qwen-code
+          ref: 455f3d07953ff3c2fe2fbd4f0cb06d98c03af169
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install the pinned dependencies without build scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Archive source and dependencies for isolated local reproduction
+        run: |
+          git rev-parse HEAD > /tmp/12151-base-sha.txt
+          tar --exclude='./.git' -cf - . | zstd -T2 -3 -o /tmp/12151-workspace.tar.zst
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-12151-reproduction-workspace
+          path: |
+            /tmp/12151-workspace.tar.zst
+            /tmp/12151-base-sha.txt
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
