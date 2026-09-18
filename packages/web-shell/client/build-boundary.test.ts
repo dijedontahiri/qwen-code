@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import pkg from './package.json' with { type: 'json' };
-import { shouldExternalizeWebShellDependency } from './build-boundary';
+import pkg from '../package.json' with { type: 'json' };
+import { shouldExternalizeWebShellDependency } from '../build-boundary';
 
 describe('web-shell package build boundary', () => {
   it('externalizes every declared runtime package and its JS subpaths', () => {
