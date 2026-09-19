@@ -171,10 +171,7 @@ describe('LocalControlService', () => {
     await service.disable();
   });
 
-  it('detaches the temporary listening handler when listen fails', async () => {
-    // Occupy the port so `listen()` rejects with EADDRINUSE. The pending
-    // `once('listening')` handler must be removed on the error path; if it
-    // lingered, a retry on the same server could resolve via the stale handler.
+  it('cleans the failed-listen handler before falling back to a free port', async () => {
     const blocker = createServer();
     await new Promise<void>((resolve) =>
       blocker.listen(0, '127.0.0.1', resolve),
@@ -194,22 +191,21 @@ describe('LocalControlService', () => {
       getPort: () => busyPort,
     });
 
-    await expect(service.enable()).rejects.toThrow();
-    expect(service.active).toBe(false);
+    const status = await service.enable();
+    expect(status.active).toBe(true);
+    expect(status.port).not.toBe(busyPort);
     expect(attached).toHaveLength(1);
 
-    // Node attaches its own internal 'listening' listener during listen(), so
-    // compare against a control server that failed the same way without any of
-    // the service's handlers: a leftover temporary handler would show up as +1.
     const control = createServer();
-    await new Promise<void>((resolve) => {
-      control.once('error', () => resolve());
-      control.listen(busyPort, '127.0.0.1');
-    });
+    await new Promise<void>((resolve) =>
+      control.listen(0, '127.0.0.1', resolve),
+    );
     expect(attached[0].listenerCount('listening')).toBe(
       control.listenerCount('listening'),
     );
 
+    await service.disable();
+    await new Promise<void>((resolve) => control.close(() => resolve()));
     await new Promise<void>((resolve) => blocker.close(() => resolve()));
   });
 });
