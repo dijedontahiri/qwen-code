@@ -1,0 +1,160 @@
+name: Validate PR 12191 document boundary r15
+
+on:
+  push:
+    branches: [validation/12191-1131af9e-r15]
+    paths: [.github/workflows/validate-12191-r15.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CI: 'true'
+      SOURCE_SHA: 1131af9e021ea773e11dbadde2ec0e44dc1b8731
+      PREVIOUS_SHA: 9efce16d482095b24d155513c0e6e513a12bfbdb
+    steps:
+      - name: Check out immutable product candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 3
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source and issue-focused scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PREVIOUS_SHA"
+          test "$(git diff --name-only "$PREVIOUS_SHA" HEAD)" = 'packages/web-templates/src/export-html/build.mjs'
+          git diff --check "$PREVIOUS_SHA" HEAD
+          grep -F 'const DOCUMENT_RUNTIME_WARNING_BYTES = 1_830_000;' packages/web-templates/src/export-html/build.mjs
+          grep -F 'const MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000;' packages/web-templates/src/export-html/build.mjs
+          git show "$PREVIOUS_SHA:packages/web-templates/src/export-html/build.mjs" | grep -F 'const DOCUMENT_RUNTIME_WARNING_BYTES = 1_870_000;'
+          git show "$PREVIOUS_SHA:packages/web-templates/src/export-html/build.mjs" | grep -F 'const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;'
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build SDK and Web Shell prerequisites
+        run: |
+          npm run build --workspace=@qwen-code/sdk
+          npm run build --workspace=@qwen-code/web-shell
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+
+      - name: Prove MCP substitution engagement guard catches a bypass
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=packages/web-templates/src/export-html/build.mjs
+          cp "$file" /tmp/build.mjs
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('packages/web-templates/src/export-html/build.mjs')
+          s = p.read_text()
+          old = r"{ filter: /^@modelcontextprotocol\/ext-apps\/app-bridge$/ },"
+          new = r"{ filter: /^@modelcontextprotocol\/ext-apps\/never-match$/ },"
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new))
+          PY
+          set +e
+          node packages/web-templates/src/export-html/build.mjs >/tmp/mcp-negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F 'Document MCP App bridge substitution did not engage' /tmp/mcp-negative.log
+          mv /tmp/build.mjs "$file"
+          git diff --exit-code -- "$file"
+
+      - name: Verify healthy document boundary and re-baselined size
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_HTML_METAFILE=/tmp/document-metafile.json node packages/web-templates/src/export-html/build.mjs | tee /tmp/document-build.log
+          grep -F 'Document export renderer JS is 1806361 bytes' /tmp/document-build.log
+          bytes=$(wc -c < packages/web-templates/src/export-html/dist/export-transcript-document.js)
+          echo "document bytes on disk: $bytes"
+          test "$bytes" -le 1870000
+          node - <<'JS'
+          const fs = require('node:fs');
+          const meta = JSON.parse(fs.readFileSync('/tmp/document-metafile.json', 'utf8'));
+          const inputs = Object.keys(meta.inputs ?? {}).map((p) => p.replaceAll('\\', '/'));
+          if (!inputs.some((p) => p === 'document-mcp-app-bridge-stub.ts' || p.endsWith('/document-mcp-app-bridge-stub.ts'))) {
+            throw new Error('expected document MCP bridge stub input');
+          }
+          if (inputs.some((p) => p.includes('node_modules/@modelcontextprotocol/'))) {
+            throw new Error('MCP runtime leaked into document metafile inputs');
+          }
+          JS
+
+      - name: Run focused package and document regressions
+        run: |
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/package-externalization.artifact.test.ts --coverage.enabled=false --retry=0
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-boundary.test.ts --coverage.enabled=false --retry=0
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/components/messages/McpApp.document.dom.test.tsx --coverage.enabled=false --retry=0
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-artifact.test.ts --coverage.enabled=false --retry=0
+          npm run test:scripts -- scripts/tests/web-terminal-build.test.ts
+
+      - name: Run Web Shell quality gates
+        run: |
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell
+          npm run format:check --workspace=@qwen-code/web-shell
+          npx prettier --experimental-cli --check packages/web-templates/src/export-html/build.mjs
+
+      - name: Pack and verify publication boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/packs /tmp/packed-web /tmp/consumer
+          mkdir -p /tmp/packs /tmp/packed-web /tmp/consumer/node_modules/@qwen-code
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          npm pack --workspace=packages/web-shell --pack-destination /tmp/packs >/tmp/web-pack-name.txt
+          web_tgz=$(find /tmp/packs -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)
+          test -n "$web_tgz"
+          tar -xzf "$web_tgz" -C /tmp/packed-web
+          for target in dist/index.js dist/transcript.js dist/daemon-react-sdk.js dist/types/index.d.ts dist/types/transcript.d.ts dist/types/daemon-react-sdk.d.ts; do
+            test -f "/tmp/packed-web/package/$target"
+          done
+          if grep -R -n -E "['\"]@/" /tmp/packed-web/package/dist/types; then
+            echo 'repository alias leaked into packed declarations' >&2
+            exit 1
+          fi
+          ln -s /tmp/packed-web/package /tmp/consumer/node_modules/@qwen-code/web-shell
+          cd /tmp/consumer
+          node --input-type=module - <<'JS'
+          for (const specifier of ['@qwen-code/web-shell','@qwen-code/web-shell/transcript','@qwen-code/web-shell/daemon-react-sdk']) {
+            const resolved = import.meta.resolve(specifier);
+            if (!resolved.startsWith('file:')) throw new Error(`unresolved export: ${specifier}`);
+          }
+          JS
+
+      - name: Run full repository preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run preflight 2>&1 | tee /tmp/preflight.log
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PREVIOUS_SHA" HEAD
