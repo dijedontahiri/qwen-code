@@ -1,0 +1,289 @@
+name: Validate PR 12191 document guard r15
+
+on:
+  push:
+    branches: [validation/12191-document-guard-r15]
+    paths: [.github/workflows/validate-12191-document-guard-r15.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CI: 'true'
+      SOURCE_SHA: 3ec369460d5e667289e297961457dd259dba42a7
+      PREVIOUS_SHA: 9efce16d482095b24d155513c0e6e513a12bfbdb
+    steps:
+      - name: Check out immutable product candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 30
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Preflight environment and immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          df -h .
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$PREVIOUS_SHA" "$SOURCE_SHA"
+          git diff --check "$PREVIOUS_SHA" "$SOURCE_SHA"
+          actual=$(git diff --name-only "$PREVIOUS_SHA" "$SOURCE_SHA" | sort)
+          expected=$(printf '%s\n' \
+            packages/web-templates/src/export-html/build.mjs \
+            packages/web-templates/src/export-html/document-mcp-stub-guard.mjs \
+            scripts/tests/document-mcp-stub-guard.test.js | sort)
+          test "$actual" = "$expected"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build SDK and healthy Web Shell
+        run: |
+          npm run build --workspace=@qwen-code/sdk
+          npm run build --workspace=@qwen-code/web-shell
+
+      - name: Prove old document guard false-passes the inlined MCP bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp packages/web-shell/package.json /tmp/web-shell-package.json
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const path = 'packages/web-shell/package.json';
+          const pkg = JSON.parse(readFileSync(path, 'utf8'));
+          const version = pkg.dependencies['@modelcontextprotocol/ext-apps'];
+          if (!version) throw new Error('missing ext-apps dependency');
+          delete pkg.dependencies['@modelcontextprotocol/ext-apps'];
+          pkg.devDependencies ??= {};
+          pkg.devDependencies['@modelcontextprotocol/ext-apps'] = version;
+          writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`);
+          JS
+          npm run build --workspace=@qwen-code/web-shell
+          git checkout "$PREVIOUS_SHA" -- packages/web-templates/src/export-html/build.mjs
+          set +e
+          EXPORT_HTML_METAFILE=/tmp/document-baseline-mutant.json \
+            node packages/web-templates/src/export-html/build.mjs \
+            >/tmp/document-baseline-mutant.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/document-baseline-mutant.log
+          test "$status" -eq 0
+          test -f /tmp/document-baseline-mutant.json
+          if grep -Fq 'document-mcp-app-bridge-stub.ts' /tmp/document-baseline-mutant.json; then
+            echo 'baseline mutant unexpectedly engaged the MCP document stub' >&2
+            exit 1
+          fi
+          document=packages/web-templates/src/export-html/dist/export-transcript-document.js
+          bytes=$(wc -c < "$document")
+          echo "baseline mutant document bytes: $bytes"
+          test "$bytes" -gt 1870000
+          test "$bytes" -le 1930000
+          grep -Fq '[ext-apps] AppBridge received' "$document"
+          git checkout "$SOURCE_SHA" -- packages/web-templates/src/export-html/build.mjs
+
+      - name: Prove candidate rejects an unengaged MCP document stub
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          EXPORT_HTML_METAFILE=/tmp/document-candidate-mutant.json \
+            node packages/web-templates/src/export-html/build.mjs \
+            >/tmp/document-candidate-mutant.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/document-candidate-mutant.log
+          test "$status" -ne 0
+          grep -Fq 'did not engage the MCP Apps document bridge stub' /tmp/document-candidate-mutant.log
+
+      - name: Prove lowered byte ceiling independently rejects the same mutant
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('packages/web-templates/src/export-html/build.mjs')
+          text = path.read_text()
+          old = 'if (!hasDocumentMcpAppBridgeStubInput(Object.keys(documentInputs))) {'
+          new = 'if (false && !hasDocumentMcpAppBridgeStubInput(Object.keys(documentInputs))) {'
+          if old not in text:
+              raise SystemExit('engagement guard shape changed')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          set +e
+          node packages/web-templates/src/export-html/build.mjs \
+            >/tmp/document-candidate-size-mutant.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/document-candidate-size-mutant.log
+          test "$status" -ne 0
+          grep -Fq 'expected <= 1870000' /tmp/document-candidate-size-mutant.log
+          git checkout "$SOURCE_SHA" -- packages/web-templates/src/export-html/build.mjs
+          cp /tmp/web-shell-package.json packages/web-shell/package.json
+          git diff --exit-code -- packages/web-shell/package.json packages/web-templates/src/export-html/build.mjs
+          npm run build --workspace=@qwen-code/web-shell
+
+      - name: Run new guard and focused package/document regressions
+        run: |
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/package-externalization.artifact.test.ts --coverage.enabled=false --retry=0
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-boundary.test.ts --coverage.enabled=false --retry=0
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/components/messages/McpApp.document.dom.test.tsx --coverage.enabled=false --retry=0
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-artifact.test.ts --coverage.enabled=false --retry=0
+          npm run test:scripts -- scripts/tests/web-terminal-build.test.ts
+
+      - name: Run Web Shell quality gates
+        run: |
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell
+          npm run format:check --workspace=@qwen-code/web-shell
+          npx prettier --experimental-cli --check packages/web-templates/src/export-html/build.mjs packages/web-templates/src/export-html/document-mcp-stub-guard.mjs scripts/tests/document-mcp-stub-guard.test.js
+
+      - name: Verify healthy document export boundary and ratchet
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_HTML_METAFILE=/tmp/document-healthy.json node packages/web-templates/src/export-html/build.mjs | tee /tmp/document-healthy.log
+          document=packages/web-templates/src/export-html/dist/export-transcript-document.js
+          bytes=$(wc -c < "$document")
+          echo "healthy document bytes: $bytes"
+          test "$bytes" -le 1870000
+          grep -Fq 'document-mcp-app-bridge-stub.ts' /tmp/document-healthy.json
+          if grep -Fq 'node_modules/@modelcontextprotocol/' /tmp/document-healthy.json; then
+            echo 'MCP Apps runtime leaked into healthy static document inputs' >&2
+            exit 1
+          fi
+          if grep -Fq '[ext-apps] AppBridge received' "$document"; then
+            echo 'interactive MCP bridge marker leaked into healthy document renderer' >&2
+            exit 1
+          fi
+
+      - name: Pack and verify publication boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/packs /tmp/packed-web /tmp/consumer
+          mkdir -p /tmp/packs /tmp/packed-web /tmp/consumer/node_modules/@qwen-code
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          npm pack --workspace=packages/web-shell --pack-destination /tmp/packs >/tmp/web-pack-name.txt
+          web_tgz=$(find /tmp/packs -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)
+          test -n "$web_tgz"
+          tar -xzf "$web_tgz" -C /tmp/packed-web
+          for target in dist/index.js dist/transcript.js dist/daemon-react-sdk.js dist/types/index.d.ts dist/types/transcript.d.ts dist/types/daemon-react-sdk.d.ts; do
+            test -f "/tmp/packed-web/package/$target"
+          done
+          if grep -R -n -E "['\"]@/" /tmp/packed-web/package/dist/types; then
+            echo 'repository alias leaked into packed declarations' >&2
+            exit 1
+          fi
+          ln -s /tmp/packed-web/package /tmp/consumer/node_modules/@qwen-code/web-shell
+          cd /tmp/consumer
+          node --input-type=module - <<'JS'
+          for (const specifier of [
+            '@qwen-code/web-shell',
+            '@qwen-code/web-shell/transcript',
+            '@qwen-code/web-shell/daemon-react-sdk',
+          ]) {
+            const resolved = import.meta.resolve(specifier);
+            if (!resolved.startsWith('file:')) throw new Error(`unresolved export: ${specifier}`);
+            console.log(specifier, resolved);
+          }
+          JS
+
+      - id: clean
+        name: Preflight stage - clean
+        continue-on-error: true
+        run: npm run clean
+
+      - id: install
+        name: Preflight stage - locked install
+        if: steps.clean.outcome == 'success'
+        continue-on-error: true
+        run: npm ci --no-audit --no-fund
+
+      - id: format
+        name: Preflight stage - format
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success'
+        continue-on-error: true
+        run: npm run format
+
+      - id: lint
+        name: Preflight stage - lint
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success'
+        continue-on-error: true
+        run: npm run lint:ci
+
+      - id: build
+        name: Preflight stage - build
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success' && steps.lint.outcome == 'success'
+        continue-on-error: true
+        run: npm run build
+
+      - id: typecheck
+        name: Preflight stage - typecheck
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success' && steps.lint.outcome == 'success' && steps.build.outcome == 'success'
+        continue-on-error: true
+        run: npm run typecheck
+
+      - id: tests
+        name: Preflight stage - test ci
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success' && steps.lint.outcome == 'success' && steps.build.outcome == 'success' && steps.typecheck.outcome == 'success'
+        continue-on-error: true
+        run: npm run test:ci
+
+      - id: serve
+        name: Preflight stage - serve fast path
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success' && steps.lint.outcome == 'success' && steps.build.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.tests.outcome == 'success'
+        continue-on-error: true
+        run: npm run check:serve-fast-path-bundle
+
+      - name: Require complete preflight success
+        if: always()
+        shell: bash
+        env:
+          CLEAN: ${{ steps.clean.outcome }}
+          INSTALL: ${{ steps.install.outcome }}
+          FORMAT: ${{ steps.format.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+          SERVE: ${{ steps.serve.outcome }}
+        run: |
+          set -euo pipefail
+          printf 'clean=%s install=%s format=%s lint=%s build=%s typecheck=%s tests=%s serve=%s\n' \
+            "$CLEAN" "$INSTALL" "$FORMAT" "$LINT" "$BUILD" "$TYPECHECK" "$TESTS" "$SERVE"
+          test "$CLEAN" = success
+          test "$INSTALL" = success
+          test "$FORMAT" = success
+          test "$LINT" = success
+          test "$BUILD" = success
+          test "$TYPECHECK" = success
+          test "$TESTS" = success
+          test "$SERVE" = success
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PREVIOUS_SHA" "$SOURCE_SHA"
