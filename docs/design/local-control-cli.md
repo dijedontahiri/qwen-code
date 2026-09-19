@@ -12,7 +12,7 @@ The command keeps the primary daemon on loopback, starts one selected LAN listen
 
 ## Behavior
 
-`--local-control` is an opt-in shortcut over the existing daemon and Web Shell. It leaves the daemon's runtime token, configured origins, and resolved port intact, adds one LAN listener on a selected private IPv4 address, allowlists that advertised origin while the session is active, and puts the pairing token in the URL fragment before rendering the QR code.
+`--local-control` is an opt-in shortcut over the existing daemon and Web Shell. It leaves the daemon's runtime token, configured origins, and resolved port intact, adds one LAN listener on a selected private IPv4 address, allowlists that advertised origin while the session is active, and puts the pairing token in the URL fragment before rendering the QR code. The LAN listener first tries the primary daemon's resolved port; if that `<LAN address>:<port>` is already occupied, it falls back to an OS-selected free port and advertises the port that was actually bound in its QR URL and status.
 
 The terminal remains the visible enabled indicator. `Ctrl+C` ends the whole daemon, not just Local Control: the graceful drain closes the LAN listener, invalidates the pairing token, and releases the existing cross-platform sleep inhibitor before the process exits. Turning Local Control off while the daemon keeps running is done from the Web Shell Settings card, which is also the only in-process re-enable path.
 
@@ -37,7 +37,7 @@ This mode intentionally covers same-network access only. Internet remote control
 
 ## Verification
 
-- Unit tests cover flag conflicts, generated-token handoff, LAN URL construction, QR output, and sleep inhibition.
+- Unit tests cover flag conflicts, generated-token handoff, LAN URL construction, QR output, busy-port fallback, and sleep inhibition.
 - Desktop Rust tests cover the gateway's Host/Origin boundary, HTTP bearer translation, WebSocket subprotocol translation, and loopback-only target requirement.
 - A real local daemon run verifies that the QR URL authenticates `/capabilities`, the Web Shell loads, and the sleep inhibitor lives only for the Local Control process.
 - A packaged macOS app pass verifies that enabling Local Control preserves the existing daemon/session, the QR opens that session from a second browser, and disabling it revokes the LAN listener and sleep assertion.
