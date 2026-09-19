@@ -1,0 +1,233 @@
+name: Validate PR 12191 exact source r14
+
+on:
+  push:
+    branches: [validation/12191-9efce16d-r14]
+    paths: [.github/workflows/validate-12191-r14.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CI: 'true'
+      SOURCE_SHA: 9efce16d482095b24d155513c0e6e513a12bfbdb
+      PREVIOUS_SHA: 5d004749bef5914c44a265c79f81bd97bd463ba6
+    steps:
+      - name: Check out immutable product candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 30
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify immutable source and rationale-only delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --check "$PREVIOUS_SHA" HEAD
+          actual=$(git diff --name-only "$PREVIOUS_SHA" HEAD | sort)
+          expected=$(printf '%s\n' \
+            packages/web-shell/vite.config.ts \
+            packages/web-shell/vite.lib.config.ts \
+            scripts/tests/web-terminal-build.test.ts | sort)
+          test "$actual" = "$expected"
+          git diff --unified=0 "$PREVIOUS_SHA" HEAD -- \
+            packages/web-shell/vite.config.ts \
+            packages/web-shell/vite.lib.config.ts \
+            scripts/tests/web-terminal-build.test.ts > /tmp/review.diff
+          if grep -E '^[+-][^+-]' /tmp/review.diff | grep -Ev '^[+-][[:space:]]*(//|\*|$)' >/dev/null; then
+            echo 'non-comment source changed in rationale repair' >&2
+            cat /tmp/review.diff
+            exit 1
+          fi
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build SDK and Web Shell
+        run: |
+          npm run build --workspace=@qwen-code/sdk
+          npm run build --workspace=@qwen-code/web-shell
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+
+      - name: Run focused package and document regressions
+        run: |
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/package-externalization.artifact.test.ts --coverage.enabled=false --retry=0
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-boundary.test.ts --coverage.enabled=false --retry=0
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/components/messages/McpApp.document.dom.test.tsx --coverage.enabled=false --retry=0
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-artifact.test.ts --coverage.enabled=false --retry=0
+          npm run test:scripts -- scripts/tests/web-terminal-build.test.ts
+
+      - name: Run Web Shell quality gates
+        run: |
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell
+          npm run format:check --workspace=@qwen-code/web-shell
+
+      - name: Verify document export boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_HTML_METAFILE=/tmp/document-metafile.json node packages/web-templates/src/export-html/build.mjs
+          document=packages/web-templates/src/export-html/dist/export-transcript-document.js
+          bytes=$(wc -c < "$document")
+          echo "document bytes: $bytes"
+          test "$bytes" -le 1930000
+          if grep -Fq 'node_modules/@modelcontextprotocol/' /tmp/document-metafile.json; then
+            echo 'MCP Apps runtime leaked into static document inputs' >&2
+            exit 1
+          fi
+
+      - name: Pack and verify publication boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/packs /tmp/packed-web /tmp/consumer
+          mkdir -p /tmp/packs /tmp/packed-web /tmp/consumer/node_modules/@qwen-code
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          npm pack --workspace=packages/web-shell --pack-destination /tmp/packs >/tmp/web-pack-name.txt
+          web_tgz=$(find /tmp/packs -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)
+          test -n "$web_tgz"
+          tar -xzf "$web_tgz" -C /tmp/packed-web
+          for target in dist/index.js dist/transcript.js dist/daemon-react-sdk.js dist/types/index.d.ts dist/types/transcript.d.ts dist/types/daemon-react-sdk.d.ts; do
+            test -f "/tmp/packed-web/package/$target"
+          done
+          if grep -R -n -E "['\"]@/" /tmp/packed-web/package/dist/types; then
+            echo 'repository alias leaked into packed declarations' >&2
+            exit 1
+          fi
+          ln -s /tmp/packed-web/package /tmp/consumer/node_modules/@qwen-code/web-shell
+          cd /tmp/consumer
+          node --input-type=module - <<'JS'
+          for (const specifier of [
+            '@qwen-code/web-shell',
+            '@qwen-code/web-shell/transcript',
+            '@qwen-code/web-shell/daemon-react-sdk',
+          ]) {
+            const resolved = import.meta.resolve(specifier);
+            if (!resolved.startsWith('file:')) throw new Error(`unresolved export: ${specifier}`);
+            console.log(specifier, resolved);
+          }
+          JS
+
+      - id: clean
+        name: Preflight stage - clean
+        continue-on-error: true
+        shell: bash
+        run: npm run clean 2>&1 | tee /tmp/preflight-clean.log
+
+      - id: install
+        name: Preflight stage - locked install
+        if: steps.clean.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: npm ci 2>&1 | tee /tmp/preflight-install.log
+
+      - id: format
+        name: Preflight stage - format
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: npm run format 2>&1 | tee /tmp/preflight-format.log
+
+      - id: lint
+        name: Preflight stage - lint
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: npm run lint:ci 2>&1 | tee /tmp/preflight-lint.log
+
+      - id: build
+        name: Preflight stage - build
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success' && steps.lint.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: npm run build 2>&1 | tee /tmp/preflight-build.log
+
+      - id: typecheck
+        name: Preflight stage - typecheck
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success' && steps.lint.outcome == 'success' && steps.build.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: npm run typecheck 2>&1 | tee /tmp/preflight-typecheck.log
+
+      - id: tests
+        name: Preflight stage - test ci
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success' && steps.lint.outcome == 'success' && steps.build.outcome == 'success' && steps.typecheck.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: npm run test:ci 2>&1 | tee /tmp/preflight-tests.log
+
+      - id: serve
+        name: Preflight stage - serve fast path
+        if: steps.clean.outcome == 'success' && steps.install.outcome == 'success' && steps.format.outcome == 'success' && steps.lint.outcome == 'success' && steps.build.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.tests.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: npm run check:serve-fast-path-bundle 2>&1 | tee /tmp/preflight-serve.log
+
+      - name: Report split preflight outcome
+        if: always()
+        shell: bash
+        env:
+          CLEAN: ${{ steps.clean.outcome }}
+          INSTALL: ${{ steps.install.outcome }}
+          FORMAT: ${{ steps.format.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+          SERVE: ${{ steps.serve.outcome }}
+        run: |
+          set -euo pipefail
+          printf 'clean=%s\ninstall=%s\nformat=%s\nlint=%s\nbuild=%s\ntypecheck=%s\ntests=%s\nserve=%s\n' \
+            "$CLEAN" "$INSTALL" "$FORMAT" "$LINT" "$BUILD" "$TYPECHECK" "$TESTS" "$SERVE"
+          for pair in \
+            "$CLEAN:/tmp/preflight-clean.log" \
+            "$INSTALL:/tmp/preflight-install.log" \
+            "$FORMAT:/tmp/preflight-format.log" \
+            "$LINT:/tmp/preflight-lint.log" \
+            "$BUILD:/tmp/preflight-build.log" \
+            "$TYPECHECK:/tmp/preflight-typecheck.log" \
+            "$TESTS:/tmp/preflight-tests.log" \
+            "$SERVE:/tmp/preflight-serve.log"; do
+            outcome=${pair%%:*}
+            log=${pair#*:}
+            if [ "$outcome" = failure ] && [ -f "$log" ]; then
+              echo "--- failing stage tail: $log ---"
+              tail -n 200 "$log"
+              break
+            fi
+          done
+          test "$CLEAN" = success
+          test "$INSTALL" = success
+          test "$FORMAT" = success
+          test "$LINT" = success
+          test "$BUILD" = success
+          test "$TYPECHECK" = success
+          test "$TESTS" = success
+          test "$SERVE" = success
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PREVIOUS_SHA" HEAD
