@@ -32,7 +32,10 @@ jobs:
           ]
           results, errors = [], []
           def api(path):
-              result = subprocess.run(['gh', 'api', path], capture_output=True, timeout=120)
+              command = ['gh', 'api', path]
+              if path.endswith('/logs'):
+                  command.append('--allow-escape-sequences')
+              result = subprocess.run(command, capture_output=True, timeout=120)
               if result.returncode:
                   raise RuntimeError(result.stderr.decode('utf-8', 'replace')[:1500])
               return result.stdout
@@ -54,6 +57,7 @@ jobs:
                       raw = api(f"repos/{repo}/actions/jobs/{job['id']}/logs")
                       (out / f"{stem}-{job['id']}.log").write_bytes(raw)
                       clean = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', raw.decode('utf-8', 'replace'))
+                      clean = ''.join(c for c in clean if c in '\n\t\r' or ord(c) >= 32)
                       lines = clean.splitlines()
                       hits = [i for i, line in enumerate(lines) if re.search(r'\bFAIL\b|AssertionError|Error:|Unhandled|[Ff]ailed [Tt]ests|\[error\]|Test Files.*failed', line)]
                       selected = set(range(max(0, len(lines)-35), len(lines)))
@@ -62,7 +66,8 @@ jobs:
                       excerpt = '\n'.join(lines[i] for i in sorted(selected))
                       item = {'repository': repo, 'run': run, 'job': job['id'], 'name': job['name'], 'conclusion': job['conclusion'], 'failed_steps': [s['name'] for s in job.get('steps',[]) if s['conclusion']=='failure'], 'excerpt': excerpt}
                       results.append(item)
-                      print(f"\n=== {repo} run {run} job {job['id']} {job['name']} ===\n{excerpt}")
+                      print(f"\n=== {repo} run {run} job {job['id']} {job['name']} ===")
+                      print('\n'.join('LOG> ' + line for line in excerpt.splitlines()))
               except Exception as exc:
                   message = f'{repo} run {run}: {exc}'
                   errors.append(message)
