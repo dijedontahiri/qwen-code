@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import { findUnexpectedImportMeta } from './import-meta-guard.mjs';
+import { assertDocumentMcpAppBridgeStubInput } from './document-mcp-stub-guard.mjs';
 import { TRANSCRIPT_CSS_ENTRY_FILTER } from './transcript-css-entry.mjs';
 
 const assetsDir = dirname(fileURLToPath(import.meta.url));
@@ -49,16 +50,14 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // compile before the transcript renders. The CSS is a separate, parallel,
 // year-cached asset and is logged rather than budgeted.
 //
-// Last measured at 1,833,894 bytes of JS with 2,302,905 bytes of CSS moved
-// out, by the Lint & Static lane on this branch. Before the split that lane
-// measured the combined bundle at 4,133,282 bytes on main at c3023b3e6d — the
-// measurement #11372 raised these two constants for, and which this branch
-// supersedes because the CSS it counted is no longer in the JS. Keep the
-// warning close to the measurement and the hard ceiling close above it: a cap
-// left far above the measurement is a ratchet with enough slack for a whole
-// dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 1_870_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;
+// Last measured at 1,806,361 bytes of JS with 2,302,905 bytes of CSS moved
+// out after the document-only MCP bridge substitution. A controlled build
+// without that substitution measured 2,111,566 bytes, so keep the warning
+// close to the healthy measurement and the hard ceiling well below that
+// regression. A cap left far above the measurement is a ratchet with enough
+// slack for a whole dependency family to come back unnoticed.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 1_830_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -324,6 +323,7 @@ if (!extractedTranscriptCss.css) {
 // below says *how much*; this says *what of*, which is the question a
 // regression actually raises.
 const documentInputs = documentBuildResult.metafile.inputs;
+assertDocumentMcpAppBridgeStubInput(documentInputs);
 const inputBytesByPackage = new Map();
 for (const [input, { bytes }] of Object.entries(documentInputs)) {
   const match = input.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//);
