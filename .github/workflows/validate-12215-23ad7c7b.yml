@@ -1,0 +1,116 @@
+name: Validate issue 12215 sed long-option repair
+
+on:
+  push:
+    branches: [validation/12215-23ad7c7b-r1]
+    paths: [.github/workflows/validate-12215-23ad7c7b.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CI: 'true'
+      SOURCE_SHA: 23ad7c7be022d40d771c14288633cfe009e7418b
+      PARENT_SHA: 6410171461f00ed2f25d77bcb640b10808ce48a0
+    steps:
+      - name: Check out immutable product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+
+      - name: Verify exact source and product scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PARENT_SHA"
+          git diff --check "$PARENT_SHA" HEAD
+          mapfile -t files < <(git diff --name-only "$PARENT_SHA" HEAD)
+          test "${#files[@]}" = 2
+          printf '%s\n' "${files[@]}" | grep -Fx 'packages/core/src/utils/shell-safety-rules.ts'
+          printf '%s\n' "${files[@]}" | grep -Fx 'packages/core/src/utils/shell-safety-rules.test.ts'
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Prove the parent classifier fails the new regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file=packages/core/src/utils/shell-safety-rules.ts
+          git show "$PARENT_SHA:$source_file" > "$source_file"
+          set +e
+          npm exec --workspace=@qwen-code/qwen-code-core -- vitest run src/utils/shell-safety-rules.test.ts --coverage.enabled=false --retry=0 2>&1 | tee /tmp/negative-control.log
+          status=${PIPESTATUS[0]}
+          set -e
+          test "$status" -ne 0
+          grep -F 'treats --quiet as the read-only alias of -n' /tmp/negative-control.log
+          grep -F 'treats --silent as the read-only alias of -n' /tmp/negative-control.log
+          git checkout "$SOURCE_SHA" -- "$source_file"
+          git diff --exit-code
+
+      - name: Run focused shell-safety regressions
+        run: |
+          npm exec --workspace=@qwen-code/qwen-code-core -- vitest run src/utils/shell-safety-rules.test.ts src/utils/shellReadOnlyChecker.test.ts src/utils/shellAstParser.test.ts --coverage.enabled=false --retry=0
+
+      - name: Typecheck lint format and build core
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run typecheck --workspace=@qwen-code/qwen-code-core
+          npm exec --workspace=@qwen-code/qwen-code-core -- eslint src/utils/shell-safety-rules.ts src/utils/shell-safety-rules.test.ts
+          npx prettier --check packages/core/src/utils/shell-safety-rules.ts packages/core/src/utils/shell-safety-rules.test.ts
+          npm run build --workspace=@qwen-code/qwen-code-core
+
+      - name: Verify built classifier semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          const { classifySedCommandSafety } = await import('./packages/core/dist/src/utils/shell-safety-rules.js');
+          const cases = [
+            [['--quiet', 's/a/b/', 'file'], 'read-only'],
+            [['--silent', 's/a/b/', 'file'], 'read-only'],
+            [['--quiet', 'w out', 'file'], 'write'],
+            [['--silent', 'w out', 'file'], 'write'],
+            [['--quiet=x', 's/a/b/', 'file'], 'unknown'],
+            [['--silentx', 's/a/b/', 'file'], 'unknown'],
+          ];
+          for (const [args, expected] of cases) {
+            const actual = classifySedCommandSafety(args);
+            console.log(JSON.stringify(args), '=>', actual);
+            if (actual !== expected) throw new Error(`${JSON.stringify(args)}: expected ${expected}, got ${actual}`);
+          }
+          JS
+
+      - name: Run full repository preflight
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run preflight 2>&1 | tee /tmp/preflight.log
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PARENT_SHA" HEAD
