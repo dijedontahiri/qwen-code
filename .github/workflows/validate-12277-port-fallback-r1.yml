@@ -1,0 +1,122 @@
+name: Validate issue 12277 port fallback r1
+
+on:
+  push:
+    branches: [validation/12277-port-fallback-r1]
+    paths: [.github/workflows/validate-12277-port-fallback-r1.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CI: 'true'
+      SOURCE_SHA: d9aa876b2c423d58217d1c1074c7a961907d8ea0
+      BASE_SHA: c1c00cbaab57177d6ea7c7876bd95d23bc9d2453
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 30
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source and issue scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          df -h .
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" "$SOURCE_SHA"
+          git diff --check "$BASE_SHA" "$SOURCE_SHA"
+          actual=$(git diff --name-only "$BASE_SHA" "$SOURCE_SHA" | sort)
+          expected=$(printf '%s\n' \
+            docs/design/local-control-cli.md \
+            packages/cli/src/serve/local-control/service.port-fallback.test.ts \
+            packages/cli/src/serve/local-control/service.test.ts \
+            packages/cli/src/serve/local-control/service.ts | sort)
+          test "$actual" = "$expected"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Prove baseline rejects the busy preferred LAN port
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout "$BASE_SHA" -- packages/cli/src/serve/local-control/service.ts
+          set +e
+          npm exec --workspace=@qwen-code/qwen-code -- vitest run src/serve/local-control/service.port-fallback.test.ts --retry=0 >/tmp/12277-baseline.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/12277-baseline.log
+          test "$status" -ne 0
+          grep -Fq 'EADDRINUSE' /tmp/12277-baseline.log
+          git checkout "$SOURCE_SHA" -- packages/cli/src/serve/local-control/service.ts
+
+      - name: Run Local Control regressions
+        run: |
+          npm exec --workspace=@qwen-code/qwen-code -- vitest run src/serve/local-control/service.port-fallback.test.ts src/serve/local-control/service.test.ts --retry=0
+
+      - name: Run CLI typecheck and lint
+        run: |
+          npm run typecheck --workspace=@qwen-code/qwen-code
+          npm run lint --workspace=@qwen-code/qwen-code
+
+      - name: Run formatting checks
+        run: |
+          npx prettier --experimental-cli --check \
+            packages/cli/src/serve/local-control/service.ts \
+            packages/cli/src/serve/local-control/service.test.ts \
+            packages/cli/src/serve/local-control/service.port-fallback.test.ts \
+            docs/design/local-control-cli.md
+
+      - name: Build CLI
+        run: npm run build --workspace=@qwen-code/qwen-code
+
+      - id: preflight
+        name: Run full repository preflight
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run preflight 2>&1 | tee /tmp/12277-preflight.log
+
+      - name: Classify repository preflight result
+        if: always()
+        shell: bash
+        env:
+          PREFLIGHT: ${{ steps.preflight.outcome }}
+        run: |
+          set -euo pipefail
+          echo "preflight=$PREFLIGHT"
+          if [ "$PREFLIGHT" = success ]; then
+            exit 0
+          fi
+          echo 'Repository preflight is red. This step does not convert it to success.' >&2
+          exit 1
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$BASE_SHA" "$SOURCE_SHA"
