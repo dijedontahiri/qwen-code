@@ -1,0 +1,91 @@
+name: OSS follow-up read-only diagnostics
+
+on:
+  push:
+    branches: [validation/oss-followup-20260919-audit]
+    paths: [.github/workflows/oss-followup-readonly.yml]
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  audit:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Read current PR checks and extract existing failure evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import io
+          import json
+          import os
+          import re
+          import subprocess
+          import zipfile
+
+          REPO = 'dijedontahiri/qwen-code'
+          USER = 'dijedontahiri'
+
+          def api(path, binary=False):
+              result = subprocess.run(['gh', 'api', path], capture_output=True, check=False, timeout=90)
+              if result.returncode:
+                  raise RuntimeError(result.stderr.decode(errors='replace')[-700:])
+              return result.stdout if binary else json.loads(result.stdout)
+
+          print('READ-ONLY AUDIT: no source changes, test reruns, reviews or scheduler mutations.')
+          search = api('search/issues?q=is:pr+is:open+author:' + USER + '+-user:' + USER + '&per_page=100')
+          print('OPEN_EXTERNAL_PR_COUNT', search['total_count'])
+          print('SEARCH_INCOMPLETE', search.get('incomplete_results', False))
+          for item in search['items']:
+              repo = item['repository_url'].split('/repos/', 1)[1]
+              number = item['number']
+              try:
+                  pr = api(f'repos/{repo}/pulls/{number}')
+                  sha = pr['head']['sha']
+                  checks = api(f'repos/{repo}/commits/{sha}/check-runs?per_page=100')
+                  statuses = api(f'repos/{repo}/commits/{sha}/status?per_page=100')
+                  reviews = api(f'repos/{repo}/pulls/{number}/reviews?per_page=100')
+                  latest = {}
+                  for review in reviews:
+                      if review['state'] in ('APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'):
+                          latest[review['user']['login']] = review['state']
+                  attention = [dict(name=c['name'], status=c['status'], result=c['conclusion'], url=c['html_url'], summary=(c.get('output', {}).get('summary') or '')[:300]) for c in checks['check_runs'] if c['conclusion'] not in ('success', 'neutral', 'skipped')]
+                  record = dict(pr=f'{repo}#{number}', head=sha, draft=pr['draft'], mergeable=pr['mergeable'], mergeable_state=pr.get('mergeable_state'), checks_total=checks['total_count'], attention=attention, legacy_status=statuses['state'], legacy_failing=[dict(name=s['context'], status=s['state'], description=s['description']) for s in statuses['statuses'] if s['state'] != 'success'], review_states=latest, reviews_may_be_partial=len(reviews) == 100)
+                  print('PR', json.dumps(record, ensure_ascii=True))
+              except Exception as exc:
+                  print('AUDIT_ERROR', f'{repo}#{number}', str(exc))
+
+          for run_id in [35455836449, 35450601506, 35450404136]:
+              try:
+                  run = api(f'repos/{REPO}/actions/runs/{run_id}')
+                  print('RUN', run_id, run['status'], run['conclusion'], 'workflow_sha=' + run['head_sha'])
+                  archive = zipfile.ZipFile(io.BytesIO(api(f'repos/{REPO}/actions/runs/{run_id}/logs', binary=True)))
+                  remaining = 9000
+                  for name in archive.namelist():
+                      if '/' not in name or not name.endswith('.txt') or not any(word in name.lower() for word in ('preflight', 'typecheck', 'lint', 'format', 'quality')):
+                          continue
+                      raw = archive.read(name).decode('utf-8', errors='replace')
+                      text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', raw)
+                      lines = [re.sub(r'^\d{4}-\d\d-\d\dT\S+\s+', '', line) for line in text.splitlines()]
+                      markers = [i for i, line in enumerate(lines) if re.search(r'\bFAIL\s|AssertionError|\berror TS\d+|\bError:|\bnpm error\b|typecheck=|lint=|format=|outcome=|Process completed with exit code', line)]
+                      selected = set(range(max(0, len(lines)-8), len(lines)))
+                      for i in markers[-12:]:
+                          selected.update(range(max(0, i-1), min(len(lines), i+4)))
+                      excerpt = '\n'.join(lines[i] for i in sorted(selected))
+                      if remaining > 0:
+                          excerpt = excerpt[-min(remaining, 3500):]
+                          print('LOG_FILE', name, '\n' + excerpt)
+                          remaining -= len(excerpt)
+              except Exception as exc:
+                  print('LOG_ERROR', run_id, str(exc))
+          print('AUDIT_COMPLETE: diagnostic execution is not a product test pass.')
+          PYTHON
