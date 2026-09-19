@@ -1,0 +1,78 @@
+name: Validate 12185 R2
+
+on:
+  push:
+    branches:
+      - validation/12185-r2-20260919
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: f17370c06965f27d6b82ec14fbae855293f83f93
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify immutable source and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "f17370c06965f27d6b82ec14fbae855293f83f93"
+          git fetch --no-tags https://github.com/QwenLM/qwen-code.git main
+          BASE_SHA="$(git merge-base HEAD FETCH_HEAD)"
+          echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+          git diff --check "$BASE_SHA" HEAD
+          printf '%s\n' \
+            '.qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md' \
+            'packages/web-shell/build-boundary.ts' \
+            'packages/web-shell/client/build-boundary.test.ts' \
+            'packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx' \
+            'packages/web-shell/package.json' \
+            'packages/web-shell/scripts/rewrite-declaration-aliases.mjs' \
+            'packages/web-shell/scripts/verify-package.mjs' \
+            'packages/web-shell/vite.lib.config.ts' \
+            'packages/web-templates/src/export-html/build.mjs' \
+            'packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts' > /tmp/expected-files
+          sort -o /tmp/expected-files /tmp/expected-files
+          git diff --name-only "$BASE_SHA" HEAD | sort > /tmp/actual-files
+          diff -u /tmp/expected-files /tmp/actual-files
+          test -z "$(git status --porcelain --untracked-files=no)"
+
+      - name: Install dependencies
+        run: node scripts/setup-worktree.js
+
+      - name: Build workspace
+        run: npm run build
+
+      - name: Focused package boundary verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build --workspace=@qwen-code/web-shell
+          npm run verify:package --workspace=@qwen-code/web-shell
+          npm run test:ci --workspace=@qwen-code/web-shell -- build-boundary.test.ts McpApp.document.dom.test.tsx
+          npm pack --workspace=packages/web-shell --dry-run --json > /tmp/web-shell-pack.json
+          node -e "const p=require('/tmp/web-shell-pack.json'); if(!Array.isArray(p)||!p[0]?.files?.length) process.exit(1)"
+
+      - name: Full repository preflight
+        run: npm run preflight
+
+      - name: Final source audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "f17370c06965f27d6b82ec14fbae855293f83f93"
+          git diff --check "$BASE_SHA" HEAD
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
