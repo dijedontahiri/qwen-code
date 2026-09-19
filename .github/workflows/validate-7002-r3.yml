@@ -1,0 +1,115 @@
+name: Validate 7002 R3
+
+on:
+  push:
+    branches:
+      - validation/7002-r3-20260919
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 13725ddb5fa7dbdc5909322b4762ae556a193112
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "13725ddb5fa7dbdc5909322b4762ae556a193112"
+          test "$(git rev-parse HEAD^)" = "0647a394c9a467e6a542a2fc686e2043052456b8"
+          git diff --check HEAD^
+          test -z "$(git status --porcelain --untracked-files=no)"
+
+      - name: Install dependencies
+        run: node scripts/setup-worktree.js
+
+      - name: Focused installer regression
+        run: npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js
+
+      - name: Prove allowed-path assertions do not pin downloader exit code
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/installation/install-qwen-standalone.sh /tmp/installer.sh
+          cp scripts/tests/install-glibc-preflight.test.js /tmp/candidate-test.js
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/installation/install-qwen-standalone.sh')
+          s = p.read_text()
+          old = '''if [[ "${METHOD}" == "detect" ]]; then
+                        return 2
+                    fi
+                    return 1'''
+          new = '''if [[ "${METHOD}" == "detect" ]]; then
+                        return 2
+                    fi
+                    return 7'''
+          count = s.count(old)
+          if count < 1:
+              raise SystemExit('standalone download failure branch not found')
+          p.write_text(s.replace(old, new))
+          print(f'mutated {count} standalone download failure branches')
+          PY
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js
+          git show HEAD^:scripts/tests/install-glibc-preflight.test.js > scripts/tests/install-glibc-preflight.test.js
+          set +e
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js >/tmp/parent-negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -q 'expected 7 to be 1' /tmp/parent-negative.log
+          mv /tmp/candidate-test.js scripts/tests/install-glibc-preflight.test.js
+          mv /tmp/installer.sh scripts/installation/install-qwen-standalone.sh
+
+      - name: Prove distro-banner fixture exercises GLIBC identity parsing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/installation/install-qwen-standalone.sh /tmp/installer.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/installation/install-qwen-standalone.sh')
+          s = p.read_text()
+          old = 'NR == 1 && /GNU libc|GNU C Library|GLIBC/ {'
+          new = 'NR == 1 && /GNU libc|GNU C Library/ {'
+          if old not in s:
+              raise SystemExit('ldd identity matcher not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          set +e
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js >/tmp/banner-negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -q 'rejects an old distro-branded glibc banner via ldd' /tmp/banner-negative.log
+          mv /tmp/installer.sh scripts/installation/install-qwen-standalone.sh
+
+      - name: Formatting and shell checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          node node_modules/prettier/bin/prettier.cjs --check scripts/tests/install-glibc-preflight.test.js
+          node scripts/lint.js --shellcheck
+
+      - name: Final source audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "13725ddb5fa7dbdc5909322b4762ae556a193112"
+          git diff --check HEAD^
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git status --porcelain --untracked-files=all)"
