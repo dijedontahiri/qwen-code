@@ -1,0 +1,153 @@
+name: Validate PR 12191 review reconciliation
+
+on:
+  push:
+    branches: [validation/12191-4508cb2e-r11]
+    paths: [.github/workflows/validate-12191-4508cb2e.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CI: 'true'
+      SOURCE_SHA: 4508cb2e0512d63392808ac6eb9a35de7ef734ff
+      PREVIOUS_SHA: 1e4ecb66ed14f47e5431bd1b9b0d208b03f0ef36
+    steps:
+      - name: Check out immutable product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+
+      - name: Verify exact source and review-repair scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PREVIOUS_SHA"
+          git diff --check "$PREVIOUS_SHA" HEAD
+          git diff --name-only "$PREVIOUS_SHA" HEAD | sort > /tmp/actual-files
+          cat > /tmp/expected-files <<'EOF'
+          .qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md
+          packages/web-shell/build-boundary.ts
+          packages/web-shell/client/build-boundary.test.ts
+          packages/web-shell/client/components/ui/alert-dialog.tsx
+          packages/web-shell/client/components/ui/dialog.tsx
+          packages/web-shell/client/components/ui/field.tsx
+          packages/web-shell/client/components/ui/toggle-group.tsx
+          packages/web-shell/client/package-externalization.artifact.test.ts
+          packages/web-shell/package.json
+          packages/web-shell/scripts/rewrite-declaration-aliases.mjs
+          packages/web-shell/scripts/verify-package.mjs
+          packages/web-shell/scripts/verify-publish-artifacts.mjs
+          EOF
+          sort -o /tmp/expected-files /tmp/expected-files
+          diff -u /tmp/expected-files /tmp/actual-files
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build SDK and Web Shell
+        run: |
+          npm run build --workspace=@qwen-code/sdk
+          npm run build --workspace=@qwen-code/web-shell
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+
+      - name: Prove the old stylesheet allowlist fails the new regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          production=packages/web-shell/build-boundary.ts
+          git show "$PREVIOUS_SHA:$production" > "$production"
+          set +e
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-boundary.test.ts --coverage.enabled=false --retry=0 2>&1 | tee /tmp/negative-control.log
+          status=${PIPESTATUS[0]}
+          set -e
+          test "$status" -ne 0
+          grep -F 'mermaid/dist/mermaid.css' /tmp/negative-control.log
+          git checkout "$SOURCE_SHA" -- "$production"
+          git diff --exit-code
+
+      - name: Run corrected focused package-boundary regressions
+        run: |
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/package-externalization.artifact.test.ts client/build-boundary.test.ts client/components/messages/McpApp.document.dom.test.tsx client/build-artifact.test.ts --coverage.enabled=false --retry=0
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell
+          npm run format:check --workspace=@qwen-code/web-shell
+
+      - name: Verify document export boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_HTML_METAFILE=/tmp/document-metafile.json node packages/web-templates/src/export-html/build.mjs
+          document=packages/web-templates/src/export-html/dist/export-transcript-document.js
+          bytes=$(wc -c < "$document")
+          echo "document bytes: $bytes"
+          test "$bytes" -le 1930000
+          if grep -Fq 'node_modules/@modelcontextprotocol/' /tmp/document-metafile.json; then
+            echo 'MCP Apps runtime leaked into static document inputs' >&2
+            exit 1
+          fi
+
+      - name: Pack and verify publication boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/packs /tmp/packed-web /tmp/consumer
+          mkdir -p /tmp/packs /tmp/packed-web /tmp/consumer/node_modules/@qwen-code
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          npm pack --workspace=packages/web-shell --pack-destination /tmp/packs >/tmp/web-pack-name.txt
+          web_tgz=$(find /tmp/packs -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)
+          test -n "$web_tgz"
+          tar -xzf "$web_tgz" -C /tmp/packed-web
+          for target in dist/index.js dist/transcript.js dist/daemon-react-sdk.js dist/types/index.d.ts dist/types/transcript.d.ts dist/types/daemon-react-sdk.d.ts; do
+            test -f "/tmp/packed-web/package/$target"
+          done
+          if grep -R -n -E "['\"]@/" /tmp/packed-web/package/dist/types; then
+            echo 'repository alias leaked into packed declarations' >&2
+            exit 1
+          fi
+          ln -s /tmp/packed-web/package /tmp/consumer/node_modules/@qwen-code/web-shell
+          cd /tmp/consumer
+          node --input-type=module - <<'JS'
+          for (const specifier of [
+            '@qwen-code/web-shell',
+            '@qwen-code/web-shell/transcript',
+            '@qwen-code/web-shell/daemon-react-sdk',
+          ]) {
+            const resolved = import.meta.resolve(specifier);
+            if (!resolved.startsWith('file:')) throw new Error(`unresolved export: ${specifier}`);
+            console.log(specifier, resolved);
+          }
+          JS
+
+      - name: Run full repository preflight
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run preflight 2>&1 | tee /tmp/preflight.log
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PREVIOUS_SHA" HEAD
