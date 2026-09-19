@@ -1,0 +1,82 @@
+name: Diagnose issue 12151 preflight
+
+on:
+  push:
+    branches: [validation/12151-eaccac9b-r13]
+    paths: [.github/workflows/validate-12151-preflight-diagnostic.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SOURCE_SHA: eaccac9bce597efa24dcc4fd56d108e5a1ff8456
+      PREVIOUS_SHA: 2203d1380c179927770c4970b7a43d9e0b1ed729
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source and one-line review repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PREVIOUS_SHA"
+          git diff --check "$PREVIOUS_SHA" HEAD
+          test "$(git diff --name-only "$PREVIOUS_SHA" HEAD)" = 'packages/core/src/utils/git-ignore-parser-cache.test.ts'
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Preflight — clean
+        run: npm run clean
+
+      - name: Preflight — locked install
+        run: npm ci
+
+      - name: Preflight — format
+        run: |
+          npm run format
+          git diff --exit-code
+
+      - name: Preflight — lint
+        run: npm run lint:ci
+
+      - name: Preflight — build
+        run: npm run build
+
+      - name: Preflight — typecheck
+        run: npm run typecheck
+
+      - name: Preflight — tests
+        run: npm run test:ci
+
+      - name: Preflight — serve fast-path bundle
+        run: npm run check:serve-fast-path-bundle
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PREVIOUS_SHA" HEAD
