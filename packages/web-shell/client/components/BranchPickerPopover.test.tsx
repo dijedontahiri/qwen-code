@@ -4303,6 +4303,13 @@ describe('BranchPickerPopover remotes view', () => {
     // equality on the pre-settle element falsifies every restore shape
     // that could reach an attached node, where `not.toBe(one testid)`
     // falsified none.
+    // Settle this workspace's independent open-focus timer before measuring
+    // whether the stale mutation moves focus. Keep the identity assertion.
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search for branches and actions"]',
+    );
+    expect(search).not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(search));
     const activeBefore = document.activeElement;
     await act(async () => {
       release?.({ v: 1, workspaceCwd: '/repo2', remotes: [] });
