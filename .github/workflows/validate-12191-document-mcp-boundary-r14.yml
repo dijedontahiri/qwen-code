@@ -1,0 +1,173 @@
+name: Validate PR 12191 document MCP boundary repair
+
+on:
+  push:
+    branches: [validation/12191-document-mcp-boundary-r14]
+    paths: [.github/workflows/validate-12191-document-mcp-boundary-r14.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CANDIDATE_SHA: e65d3bc14b52448591df1744a2f814992187c0f1
+      PARENT_SHA: 9efce16d482095b24d155513c0e6e513a12bfbdb
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 30
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source and candidate scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PARENT_SHA"
+          git diff --check "$PARENT_SHA" HEAD
+          actual=$(git diff --name-only "$PARENT_SHA" HEAD | sort)
+          expected=$(printf '%s\n' \
+            packages/web-templates/src/export-html/build.mjs \
+            packages/web-templates/src/export-html/document-mcp-stub-guard.mjs \
+            scripts/tests/export-html-mcp-stub-guard.test.js | sort)
+          test "$actual" = "$expected"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build Web Shell prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build --workspace @qwen-code/sdk
+          npm run build --workspace @qwen-code/web-shell
+
+      - name: Prove parent misses prebundled MCP bridge and candidate fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp packages/web-templates/src/export-html/build.mjs /tmp/candidate-build.mjs
+          node <<'NODE'
+          const fs = require('fs');
+          const path = 'packages/web-shell/package.json';
+          const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const version = pkg.dependencies['@modelcontextprotocol/ext-apps'];
+          if (!version) throw new Error('expected ext-apps runtime dependency');
+          delete pkg.dependencies['@modelcontextprotocol/ext-apps'];
+          pkg.devDependencies['@modelcontextprotocol/ext-apps'] = version;
+          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+          npm run build --workspace @qwen-code/web-shell
+
+          git show "$PARENT_SHA:packages/web-templates/src/export-html/build.mjs" > packages/web-templates/src/export-html/build.mjs
+          set +e
+          EXPORT_HTML_METAFILE=/tmp/parent-prebundled.json \
+            node packages/web-templates/src/export-html/build.mjs > /tmp/parent-prebundled.log 2>&1
+          parent_rc=$?
+          set -e
+          cat /tmp/parent-prebundled.log
+          test "$parent_rc" -eq 0
+          node -e "const m=require('/tmp/parent-prebundled.json'); if(Object.keys(m.inputs).some(k=>/[\\\\/]document-mcp-app-bridge-stub\\.ts$/.test(k))) process.exit(1)"
+
+          cp /tmp/candidate-build.mjs packages/web-templates/src/export-html/build.mjs
+          set +e
+          EXPORT_HTML_METAFILE=/tmp/candidate-prebundled.json \
+            node packages/web-templates/src/export-html/build.mjs > /tmp/candidate-prebundled.log 2>&1
+          candidate_rc=$?
+          set -e
+          cat /tmp/candidate-prebundled.log
+          test "$candidate_rc" -ne 0
+          grep -F 'Document export MCP bridge substitution did not engage' /tmp/candidate-prebundled.log
+
+          git checkout "$CANDIDATE_SHA" -- \
+            packages/web-shell/package.json \
+            packages/web-templates/src/export-html/build.mjs
+          npm run build --workspace @qwen-code/web-shell
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Run focused document and build-boundary regressions
+        run: >-
+          npm run test:scripts --
+          scripts/tests/export-html-mcp-stub-guard.test.js
+          scripts/tests/transcript-css-entry-filter.test.js
+          scripts/tests/export-html-import-meta-guard.test.js
+          scripts/tests/web-terminal-build.test.ts
+
+      - name: Build exact healthy document and measure boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_HTML_METAFILE=/tmp/document-metafile.json \
+            node packages/web-templates/src/export-html/build.mjs | tee /tmp/document-build.log
+          node <<'NODE'
+          const fs = require('fs');
+          const meta = JSON.parse(fs.readFileSync('/tmp/document-metafile.json', 'utf8'));
+          const inputs = Object.keys(meta.inputs);
+          if (!inputs.some((k) => /[\\/]document-mcp-app-bridge-stub\.ts$/.test(k))) {
+            throw new Error('stub input missing from healthy exact-source metafile');
+          }
+          const bytes = fs.statSync('packages/web-templates/src/export-html/dist/export-transcript-document.js').size;
+          console.log(`Measured exact-source document renderer: ${bytes} bytes`);
+          if (bytes < 1700000 || bytes > 1830000) {
+            throw new Error(`document renderer ${bytes} outside expected 1.70MB..1.83MB healthy band`);
+          }
+          NODE
+
+      - name: Run Web Shell quality checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run typecheck --workspace @qwen-code/web-shell
+          npm run lint --workspace @qwen-code/web-shell
+          npm run format:check --workspace @qwen-code/web-shell
+
+      - name: Preflight clean
+        run: npm run clean
+
+      - name: Preflight install
+        run: npm ci
+
+      - name: Preflight format
+        run: npm run format
+
+      - name: Preflight lint
+        run: npm run lint:ci
+
+      - name: Preflight build
+        run: npm run build
+
+      - name: Preflight typecheck
+        run: npm run typecheck
+
+      - name: Preflight tests
+        run: npm run test:ci
+
+      - name: Preflight serve fast-path check
+        run: npm run check:serve-fast-path-bundle
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --check "$PARENT_SHA" HEAD
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
