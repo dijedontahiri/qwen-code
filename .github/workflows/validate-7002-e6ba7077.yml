@@ -106,9 +106,26 @@ jobs:
         run: node scripts/lint.js --shellcheck
 
       - name: Full repository preflight
-        run: npm run preflight
+        id: preflight
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          npm run preflight 2>&1 | tee /tmp/preflight.log
+          status=${PIPESTATUS[0]}
+          {
+            echo '### `npm run preflight` tail'
+            echo
+            echo '```text'
+            tail -n 300 /tmp/preflight.log
+            echo '```'
+            echo
+            echo "Exit status: ${status}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
       - name: Final exact-source audit
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
@@ -116,3 +133,8 @@ jobs:
           test -z "$(git diff --name-only)"
           test -z "$(git diff --cached --name-only)"
           test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Preserve preflight result
+        if: always()
+        shell: bash
+        run: test "${{ steps.preflight.outcome }}" = success
