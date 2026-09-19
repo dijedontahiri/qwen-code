@@ -1,0 +1,158 @@
+name: OSS repair baseline probes 20260919
+on:
+  push:
+    branches: [validation/oss-repair-20260919-0335-diagnostics]
+    paths: [.github/workflows/oss-repair-probes-20260919.yml]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: oss-repair-probes-20260919
+  cancel-in-progress: false
+jobs:
+  sources:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Collect immutable source and current contribution status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, pathlib, subprocess
+          out = pathlib.Path('sources'); out.mkdir()
+          def api(path):
+              p = subprocess.run(['gh','api',path],capture_output=True,timeout=90)
+              if p.returncode: raise RuntimeError(p.stderr.decode()[:1000])
+              return json.loads(p.stdout)
+          refs = {
+              'installer-head':'e6ba70778c4d39723317b25ae1095545c2ed98e9',
+              'installer-base':'55af216760b938398769e17f4e8ba5d2c00fa071c',
+              'webshell-head':'f17370c06965f27d6b82ec14fbae855293f83f93',
+              'webshell-base':'eb48b52da82a60341fd4a3b42a2d7410aa734ad7',
+          }
+          common=['AGENTS.md','CONTRIBUTING.md','SECURITY.md','package.json','vitest.config.ts','.github/pull_request_template.md']
+          scoped={
+            'installer':['packages/channels/feishu/src/adapter.test.ts','packages/channels/feishu/src/FeishuAdapter.ts','packages/channels/feishu/src/media.ts','packages/channels/feishu/package.json','packages/channels/feishu/vitest.config.ts'],
+            'webshell':['packages/web-shell/client/components/BranchPickerPopover.test.tsx','packages/web-shell/client/components/BranchPickerPopover.tsx','packages/web-shell/vitest.config.ts','packages/web-shell/package.json'],
+          }
+          errors=[]
+          for label,ref in refs.items():
+            for path in common + scoped[label.split('-')[0]]:
+              try:
+                data=api(f'repos/dijedontahiri/qwen-code/contents/{path}?ref={ref}')
+                dest=out/label/path;dest.parent.mkdir(parents=True,exist_ok=True)
+                dest.write_bytes(base64.b64decode(data['content']))
+              except Exception as e: errors.append(f'{label} {path}: {e}')
+          inventory=[]
+          query='is:pr author:dijedontahiri -user:dijedontahiri is:open'
+          import urllib.parse
+          search=api('search/issues?q='+urllib.parse.quote(query)+'&per_page=100&page=1')
+          (out/'search.json').write_text(json.dumps(search,indent=2))
+          for item in search['items']:
+            repo=item['repository_url'].split('/repos/')[1];number=item['number']
+            try:
+              pr=api(f'repos/{repo}/pulls/{number}')
+              reviews=api(f'repos/{repo}/pulls/{number}/reviews?per_page=100&page=1')
+              checks=[]
+              for sha in dict.fromkeys([pr['head']['sha'],pr['merge_commit_sha']]):
+                if not sha: continue
+                page=1
+                while True:
+                  data=api(f'repos/{repo}/commits/{sha}/check-runs?per_page=100&page={page}')
+                  checks.extend(dict(source_sha=sha,**c) for c in data['check_runs'])
+                  if page*100>=data['total_count']: break
+                  page+=1
+              record={'repository':repo,'pr':number,'head':pr['head']['sha'],'base':pr['base']['sha'],'draft':pr['draft'],'mergeable':pr['mergeable'],'labels':[l['name'] for l in pr['labels']],'reviews':reviews,'checks':checks,'title':pr['title']}
+              inventory.append(record)
+              print(repo,number,pr['head']['sha'][:10],[(c['name'],c['conclusion']) for c in checks if c['conclusion'] not in ('success','skipped','neutral')])
+            except Exception as e: errors.append(f'{repo}#{number}: {e}')
+          (out/'inventory.json').write_text(json.dumps(inventory,indent=2))
+          (out/'collection-errors.json').write_text(json.dumps(errors,indent=2))
+          print('Source collection limitations:',errors)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oss-repair-sources-and-inventory
+          path: sources/
+          retention-days: 7
+          if-no-files-found: error
+  probe:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: installer-head
+            source: e6ba70778c4d39723317b25ae1095545c2ed98e9
+            package: packages/channels/feishu
+            test: src/adapter.test.ts
+            title: dispatches both media and ordinary text
+          - label: installer-base
+            source: 55af216760b938398769e17f4e8ba5d2c00fa071c
+            package: packages/channels/feishu
+            test: src/adapter.test.ts
+            title: dispatches both media and ordinary text
+          - label: webshell-head
+            source: f17370c06965f27d6b82ec14fbae855293f83f93
+            package: packages/web-shell
+            test: client/components/BranchPickerPopover.test.tsx
+            title: resets the remotes view and restores no focus after a workspace switch
+          - label: webshell-base
+            source: eb48b52da82a60341fd4a3b42a2d7410aa734ad7
+            package: packages/web-shell
+            test: client/components/BranchPickerPopover.test.tsx
+            title: resets the remotes view and restores no focus after a workspace switch
+    env:
+      CI: true
+      SOURCE: ${{ matrix.source }}
+      PACKAGE: ${{ matrix.package }}
+      TEST_FILE: ${{ matrix.test }}
+      TEST_TITLE: ${{ matrix.title }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: dijedontahiri/qwen-code
+          ref: ${{ matrix.source }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify exact source and install normal dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          printf '%s\n' "$SOURCE" > "$RUNNER_TEMP/evidence/source.txt"
+          node --version > "$RUNNER_TEMP/evidence/node.txt"
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/evidence/install.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/evidence/install.log"; exit 1; }
+      - name: Run failing test and full affected file without retries
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$PACKAGE"
+          node "$GITHUB_WORKSPACE/node_modules/vitest/vitest.mjs" run "$TEST_FILE" -t "$TEST_TITLE" --retry=0 > "$RUNNER_TEMP/evidence/target.log" 2>&1
+          target=$?
+          node "$GITHUB_WORKSPACE/node_modules/vitest/vitest.mjs" run "$TEST_FILE" --retry=0 > "$RUNNER_TEMP/evidence/file.log" 2>&1
+          file=$?
+          printf 'target=%s\nfile=%s\n' "$target" "$file" | tee "$RUNNER_TEMP/evidence/results.txt"
+          tail -n 90 "$RUNNER_TEMP/evidence/target.log"
+          tail -n 90 "$RUNNER_TEMP/evidence/file.log"
+          git diff --exit-code
+          audit=$?
+          printf 'tracked_diff=%s\n' "$audit" >> "$RUNNER_TEMP/evidence/results.txt"
+          test "$target" -eq 0 -a "$file" -eq 0 -a "$audit" -eq 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oss-repair-probe-${{ matrix.label }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 7
+          if-no-files-found: error
