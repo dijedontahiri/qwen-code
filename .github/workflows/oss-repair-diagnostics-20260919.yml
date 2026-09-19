@@ -1,0 +1,82 @@
+name: OSS repair diagnostics 20260919
+on:
+  push:
+    branches: [validation/oss-repair-20260919-0335-diagnostics]
+    paths: [.github/workflows/oss-repair-diagnostics-20260919.yml]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: oss-repair-diagnostics-20260919-0335
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Collect failed jobs and bounded failure excerpts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, re, subprocess, sys
+          out = pathlib.Path('diagnostics')
+          out.mkdir()
+          targets = [
+              ('dijedontahiri/qwen-code', 35411684693),
+              ('dijedontahiri/qwen-code', 35395495712),
+              ('strapi/strapi', 35331306368),
+          ]
+          results, errors = [], []
+          def api(path):
+              result = subprocess.run(['gh', 'api', path], capture_output=True, timeout=120)
+              if result.returncode:
+                  raise RuntimeError(result.stderr.decode('utf-8', 'replace')[:1500])
+              return result.stdout
+          for repo, run in targets:
+              try:
+                  jobs = []
+                  page = 1
+                  while True:
+                      data = json.loads(api(f'repos/{repo}/actions/runs/{run}/jobs?per_page=100&page={page}'))
+                      jobs.extend(data['jobs'])
+                      if len(jobs) >= data['total_count'] or not data['jobs']:
+                          break
+                      page += 1
+                  stem = f"{repo.replace('/', '-')}-{run}"
+                  (out / f'{stem}-jobs.json').write_text(json.dumps(jobs, indent=2))
+                  for job in jobs:
+                      if job['conclusion'] not in ('failure', 'timed_out', 'cancelled', 'startup_failure'):
+                          continue
+                      raw = api(f"repos/{repo}/actions/jobs/{job['id']}/logs")
+                      (out / f"{stem}-{job['id']}.log").write_bytes(raw)
+                      clean = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', raw.decode('utf-8', 'replace'))
+                      lines = clean.splitlines()
+                      hits = [i for i, line in enumerate(lines) if re.search(r'\bFAIL\b|AssertionError|Error:|Unhandled|[Ff]ailed [Tt]ests|\[error\]|Test Files.*failed', line)]
+                      selected = set(range(max(0, len(lines)-35), len(lines)))
+                      for i in hits[-16:]:
+                          selected.update(range(max(0,i-3), min(len(lines),i+18)))
+                      excerpt = '\n'.join(lines[i] for i in sorted(selected))
+                      item = {'repository': repo, 'run': run, 'job': job['id'], 'name': job['name'], 'conclusion': job['conclusion'], 'failed_steps': [s['name'] for s in job.get('steps',[]) if s['conclusion']=='failure'], 'excerpt': excerpt}
+                      results.append(item)
+                      print(f"\n=== {repo} run {run} job {job['id']} {job['name']} ===\n{excerpt}")
+              except Exception as exc:
+                  message = f'{repo} run {run}: {exc}'
+                  errors.append(message)
+                  print('COLLECTION_ERROR: ' + message)
+          (out / 'failure-summary.json').write_text(json.dumps({'results': results, 'errors': errors}, indent=2))
+          print(f'Collected {len(results)} failed jobs; collection errors: {len(errors)}. No tests or product changes were performed by this job.')
+          if errors:
+              sys.exit(1)
+          PY
+      - name: Preserve diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-repair-diagnostics-20260919
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 7
