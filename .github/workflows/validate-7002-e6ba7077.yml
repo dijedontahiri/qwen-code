@@ -45,8 +45,20 @@ jobs:
         run: |
           set -euo pipefail
           cp scripts/installation/install-qwen-standalone.sh /tmp/installer.sh
-          perl -0pi -e 's/(log_warning "Failed to download standalone archive\."\n\s*)return 1/${1}return 2/' scripts/installation/install-qwen-standalone.sh
-          grep -A1 -F 'Failed to download standalone archive.' scripts/installation/install-qwen-standalone.sh | grep -F 'return 2'
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/installation/install-qwen-standalone.sh')
+          text = path.read_text()
+          old = '''                    log_warning "Failed to download standalone archive."
+                    if [[ "${METHOD}" == "detect" ]]; then
+                        return 2
+                    fi
+                    return 1'''
+          new = old.rsplit('return 1', 1)[0] + 'return 3'
+          assert old in text, 'standalone download failure block changed'
+          path.write_text(text.replace(old, new, 1))
+          PY
+          grep -A4 -F 'Failed to download standalone archive.' scripts/installation/install-qwen-standalone.sh | grep -F 'return 3'
 
           git checkout HEAD^ -- scripts/tests/install-glibc-preflight.test.js
           set +e
@@ -54,7 +66,7 @@ jobs:
           baseline_status=$?
           set -e
           test "$baseline_status" -ne 0
-          grep -F 'expected 2 to be 1' /tmp/baseline.log
+          grep -F 'expected 3 to be 1' /tmp/baseline.log
 
           git checkout HEAD -- scripts/tests/install-glibc-preflight.test.js
           npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js
