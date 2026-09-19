@@ -77,9 +77,7 @@ jobs:
                   "const documentInputs = documentBuildResult.metafile.inputs;\n",
                   "const documentInputs = documentBuildResult.metafile.inputs;\n"
                   "const documentMcpStubEngaged = Object.keys(documentInputs).some((input) =>\n"
-                  "  input\n"
-                  "    .replaceAll('\\\\', '/')\n"
-                  "    .endsWith('/document-mcp-app-bridge-stub.ts'),\n"
+                  "  input.replaceAll('\\\\', '/').endsWith('/document-mcp-app-bridge-stub.ts'),\n"
                   ");\n"
                   "if (!documentMcpStubEngaged) {\n"
                   "  throw new Error(\n"
