@@ -1,0 +1,177 @@
+name: Validate PR 12191 on current main r2
+
+on:
+  push:
+    branches: [validation/12191-current-main-r2]
+    paths: [.github/workflows/validate-12191-current-main-r2.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CI: 'true'
+      SOURCE_SHA: b50b949f481038f88187236f572388c3a2d549c6
+      BASE_SHA: 28029ac7819c4981ccad2c295297647c28d779f5
+    steps:
+      - name: Check out immutable test-merge candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+
+      - name: Verify exact test-merge scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          git diff --check "$BASE_SHA" "$SOURCE_SHA"
+          cat > /tmp/expected-files <<'EOF'
+          .qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md
+          packages/web-shell/build-boundary.ts
+          packages/web-shell/client/build-boundary.test.ts
+          packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx
+          packages/web-shell/client/package-externalization.artifact.test.ts
+          packages/web-shell/vite.lib.config.ts
+          packages/web-templates/src/export-html/build.mjs
+          packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts
+          EOF
+          git diff --name-only "$BASE_SHA" "$SOURCE_SHA" | sort > /tmp/actual-files
+          diff -u /tmp/expected-files /tmp/actual-files
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build SDK prerequisite
+        run: npm run build --workspace=@qwen-code/sdk
+
+      - name: Prove current main fails the new externalization regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          config=packages/web-shell/vite.lib.config.ts
+          git show "$BASE_SHA:$config" > "$config"
+          npm run build --workspace=@qwen-code/web-shell
+          set +e
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/package-externalization.artifact.test.ts --coverage.enabled=false --retry=0 2>&1 | tee /tmp/negative-externalization.log
+          status=${PIPESTATUS[0]}
+          set -e
+          test "$status" -ne 0
+          grep -F '@modelcontextprotocol/ext-apps should remain external' /tmp/negative-externalization.log
+          git checkout "$SOURCE_SHA" -- "$config"
+          npm run build --workspace=@qwen-code/web-shell
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          git diff --exit-code
+
+      - name: Run focused package-boundary regressions
+        run: |
+          npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/package-externalization.artifact.test.ts client/build-boundary.test.ts client/components/messages/McpApp.document.dom.test.tsx client/build-artifact.test.ts --coverage.enabled=false --retry=0
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell
+          npm run format:check --workspace=@qwen-code/web-shell
+
+      - name: Measure public library entries
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          for (const entry of ['index', 'transcript']) {
+            const source = readFileSync(`packages/web-shell/dist/${entry}.js`, 'utf8');
+            const remainder = source.replace(/^const __qwenWebShellCss=[^\n]*\n/, '');
+            console.log(`${entry} bytes=${source.length} remainder=${remainder.length}`);
+          }
+          JS
+
+      - name: Prove document bridge substitution is required
+        shell: bash
+        run: |
+          set -euo pipefail
+          builder=packages/web-templates/src/export-html/build.mjs
+          git show "$BASE_SHA:$builder" > "$builder"
+          set +e
+          EXPORT_HTML_METAFILE=/tmp/document-negative.json node "$builder" 2>&1 | tee /tmp/negative-document.log
+          status=${PIPESTATUS[0]}
+          set -e
+          test "$status" -ne 0
+          grep -E 'Document export renderer JS is|forbidden input' /tmp/negative-document.log
+          git checkout "$SOURCE_SHA" -- "$builder"
+          git diff --exit-code
+
+      - name: Verify document export boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_HTML_METAFILE=/tmp/document-metafile.json node packages/web-templates/src/export-html/build.mjs 2>&1 | tee /tmp/document-build.log
+          document=packages/web-templates/src/export-html/dist/export-transcript-document.js
+          bytes=$(wc -c < "$document")
+          echo "document bytes: $bytes"
+          test "$bytes" -le 1930000
+          grep -F 'document-mcp-app-bridge-stub.ts' /tmp/document-metafile.json >/dev/null
+          if grep -Fq 'node_modules/@modelcontextprotocol/' /tmp/document-metafile.json; then
+            echo 'MCP Apps runtime leaked into static document inputs' >&2
+            exit 1
+          fi
+
+      - name: Pack and verify real consumer resolution
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/packs /tmp/packed-web /tmp/consumer
+          mkdir -p /tmp/packs /tmp/packed-web /tmp/consumer/node_modules/@qwen-code
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          npm pack --workspace=packages/web-shell --pack-destination /tmp/packs >/tmp/web-pack-name.txt
+          web_tgz=$(find /tmp/packs -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)
+          test -n "$web_tgz"
+          tar -xzf "$web_tgz" -C /tmp/packed-web
+          for target in dist/index.js dist/transcript.js dist/daemon-react-sdk.js dist/types/index.d.ts dist/types/transcript.d.ts dist/types/daemon-react-sdk.d.ts; do
+            test -f "/tmp/packed-web/package/$target"
+          done
+          if grep -R -n -E "['\"]@/" /tmp/packed-web/package/dist/types; then
+            echo 'repository alias leaked into packed declarations' >&2
+            exit 1
+          fi
+          ln -s /tmp/packed-web/package /tmp/consumer/node_modules/@qwen-code/web-shell
+          cd /tmp/consumer
+          node --input-type=module - <<'JS'
+          for (const specifier of [
+            '@qwen-code/web-shell',
+            '@qwen-code/web-shell/transcript',
+            '@qwen-code/web-shell/daemon-react-sdk',
+          ]) {
+            const resolved = import.meta.resolve(specifier);
+            if (!resolved.startsWith('file:')) throw new Error(`unresolved export: ${specifier}`);
+            console.log(specifier, resolved);
+          }
+          JS
+
+      - name: Run full repository preflight
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run preflight 2>&1 | tee /tmp/preflight.log
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$BASE_SHA" "$SOURCE_SHA"
