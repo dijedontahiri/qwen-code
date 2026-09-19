@@ -1,0 +1,172 @@
+name: Validate issue 12185 document guard repairs
+
+on:
+  push:
+    branches: [validation/12185-document-guards-r14]
+    paths: [.github/workflows/validate-12185-document-guards-r14.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SOURCE_SHA: 9efce16d482095b24d155513c0e6e513a12bfbdb
+    steps:
+      - name: Checkout immutable candidate source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Apply proposed review repair deterministically
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('packages/web-templates/src/export-html/build.mjs')
+          source = path.read_text()
+
+          replacements = [
+              (
+                  "// Last measured at 1,833,894 bytes of JS with 2,302,905 bytes of CSS moved\n"
+                  "// out, by the Lint & Static lane on this branch. Before the split that lane\n"
+                  "// measured the combined bundle at 4,133,282 bytes on main at c3023b3e6d — the\n"
+                  "// measurement #11372 raised these two constants for, and which this branch\n"
+                  "// supersedes because the CSS it counted is no longer in the JS. Keep the\n"
+                  "// warning close to the measurement and the hard ceiling close above it: a cap\n"
+                  "// left far above the measurement is a ratchet with enough slack for a whole\n"
+                  "// dependency family to come back unnoticed.\n"
+                  "const DOCUMENT_RUNTIME_WARNING_BYTES = 1_870_000;\n"
+                  "const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;",
+                  "// Last measured at 1,806,361 bytes of JS with 2,302,905 bytes of CSS moved\n"
+                  "// out after the document-only MCP bridge substitution. A control with that\n"
+                  "// substitution disabled measured 2,111,566 bytes, so keep the warning close\n"
+                  "// to the healthy measurement and the hard ceiling low enough to catch a\n"
+                  "// meaningful MCP-runtime re-entry. Before the CSS split, the Lint & Static\n"
+                  "// lane measured the combined bundle at 4,133,282 bytes on main at c3023b3e6d.\n"
+                  "// A cap left far above the current measurement is a ratchet with enough slack\n"
+                  "// for a dependency family to come back unnoticed.\n"
+                  "const DOCUMENT_RUNTIME_WARNING_BYTES = 1_830_000;\n"
+                  "const MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000;"
+              ),
+              (
+                  "const documentInputs = documentBuildResult.metafile.inputs;\n",
+                  "const documentInputs = documentBuildResult.metafile.inputs;\n"
+                  "const documentMcpStubEngaged = Object.keys(documentInputs).some((input) =>\n"
+                  "  input\n"
+                  "    .replaceAll('\\\\', '/')\n"
+                  "    .endsWith('/document-mcp-app-bridge-stub.ts'),\n"
+                  ");\n"
+                  "if (!documentMcpStubEngaged) {\n"
+                  "  throw new Error(\n"
+                  "    'Document export MCP bridge substitution did not engage: expected ' +\n"
+                  "      'document-mcp-app-bridge-stub.ts in the esbuild metafile inputs.',\n"
+                  "  );\n"
+                  "}\n"
+              ),
+          ]
+
+          for old, new in replacements:
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one replacement target, found {count}')
+              source = source.replace(old, new, 1)
+
+          path.write_text(source)
+          PY
+          git diff --check
+          test "$(git diff --name-only)" = 'packages/web-templates/src/export-html/build.mjs'
+          grep -F 'const DOCUMENT_RUNTIME_WARNING_BYTES = 1_830_000;' packages/web-templates/src/export-html/build.mjs
+          grep -F 'const MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000;' packages/web-templates/src/export-html/build.mjs
+          grep -F 'Document export MCP bridge substitution did not engage' packages/web-templates/src/export-html/build.mjs
+
+      - name: Check proposed source formatting
+        run: npx prettier --check packages/web-templates/src/export-html/build.mjs
+
+      - name: Build workspace with proposed guards
+        run: npm run build
+
+      - name: Run healthy document export build
+        shell: bash
+        run: |
+          set -euo pipefail
+          node packages/web-templates/src/export-html/build.mjs 2>&1 | tee /tmp/document-build.log
+          grep -F 'Document export renderer JS is ' /tmp/document-build.log
+          if grep -F 'exceeds the 1830000-byte warning threshold' /tmp/document-build.log; then
+            echo 'healthy document build exceeded the tightened warning threshold' >&2
+            exit 1
+          fi
+
+      - name: Prove the MCP-stub engagement guard detects a broken substitution
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=packages/web-templates/src/export-html/build.mjs
+          cp "$file" /tmp/build.mjs.candidate
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('packages/web-templates/src/export-html/build.mjs')
+          source = path.read_text()
+          old = "      () => ({ path: documentMcpAppBridgeStub }),"
+          new = "      () => ({ path: documentMermaidStub }),"
+          if source.count(old) != 1:
+              raise SystemExit('expected exactly one MCP bridge substitution callback')
+          path.write_text(source.replace(old, new, 1))
+          PY
+          set +e
+          node packages/web-templates/src/export-html/build.mjs > /tmp/document-stub-negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F 'Document export MCP bridge substitution did not engage' /tmp/document-stub-negative.log
+          cp /tmp/build.mjs.candidate "$file"
+          git diff --check
+
+      - name: Re-run healthy document build after negative control restoration
+        run: node packages/web-templates/src/export-html/build.mjs
+
+      - name: Run Web Shell boundary regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/web-shell
+          npx vitest run \
+            client/build-boundary.test.ts \
+            client/build-artifact.test.ts \
+            client/package-externalization.artifact.test.ts \
+            --retry=0
+
+      - name: Final candidate patch audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git diff --name-only)" = 'packages/web-templates/src/export-html/build.mjs'
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check
