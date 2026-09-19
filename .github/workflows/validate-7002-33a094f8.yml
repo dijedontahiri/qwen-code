@@ -1,0 +1,119 @@
+name: Validate issue 7002 floor-pin repair
+
+on:
+  push:
+    branches: [validation/7002-33a094f8-r6]
+    paths: [.github/workflows/validate-7002-33a094f8.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      CANDIDATE_SHA: 33a094f8dc3eadf37b598fd1593e3d9809088a82
+      PREVIOUS_SHA: 78ba1c4b8d15fe52e0538334664de733c1f3a196
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 3
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source and review-repair scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --check "$PREVIOUS_SHA" HEAD
+          test "$(git diff --name-only "$PREVIOUS_SHA" HEAD)" = 'scripts/tests/install-glibc-preflight.test.js'
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Prove the new 2.27 fixture pins the 2.28 floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          production=scripts/installation/install-qwen-standalone.sh
+          cp "$production" /tmp/install-qwen-standalone.sh
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/installation/install-qwen-standalone.sh')
+          source = path.read_text()
+          old = 'glibc_version_at_least "${glibc_version}" 2 28'
+          new = 'glibc_version_at_least "${glibc_version}" 2 20'
+          assert source.count(old) == 1
+          path.write_text(source.replace(old, new))
+          PY
+          set +e
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js -t 'rejects glibc 2.27 before any release download' > /tmp/floor-negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F 'rejects glibc 2.27 before any release download' /tmp/floor-negative.log
+          grep -F 'this system has glibc 2.27' /tmp/floor-negative.log
+          cp /tmp/install-qwen-standalone.sh "$production"
+          git diff --exit-code -- "$production"
+
+      - name: Run focused installer suites
+        run: |
+          npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js
+          npm run test:scripts -- scripts/tests/install-script.test.js
+
+      - name: Run shell checks
+        run: node scripts/lint.js --shellcheck
+
+      - name: Run formatting check
+        run: npx prettier --experimental-cli --check scripts/tests/install-glibc-preflight.test.js
+
+      - name: Run full repository preflight and capture output
+        id: preflight
+        shell: bash
+        run: |
+          set -uo pipefail
+          set +e
+          npm run preflight 2>&1 | tee preflight.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "preflight exit status: $status"
+
+      - name: Upload preflight diagnostic log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: preflight-issue-7002-${{ env.CANDIDATE_SHA }}
+          path: preflight.log
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PREVIOUS_SHA" HEAD
+
+      - name: Preserve preflight outcome
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.preflight.outputs.status }}" = 0
