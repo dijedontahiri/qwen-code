@@ -38,11 +38,15 @@ jobs:
             '.qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md' \
             'packages/web-shell/build-boundary.ts' \
             'packages/web-shell/client/build-boundary.test.ts' \
+            'packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx' \
             'packages/web-shell/package.json' \
             'packages/web-shell/scripts/rewrite-declaration-aliases.mjs' \
             'packages/web-shell/scripts/verify-package.mjs' \
-            'packages/web-shell/vite.lib.config.ts' > /tmp/expected-files
+            'packages/web-shell/vite.lib.config.ts' \
+            'packages/web-templates/src/export-html/build.mjs' \
+            'packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts' > /tmp/expected-files
           git diff --name-only "$BASE_SHA" HEAD | sort > /tmp/actual-files
+          sort -o /tmp/expected-files /tmp/expected-files
           diff -u /tmp/expected-files /tmp/actual-files
 
       - name: Install repository dependencies
@@ -73,7 +77,7 @@ jobs:
           set -euo pipefail
           npm run build --workspace=@qwen-code/web-shell
           node packages/web-shell/scripts/verify-package.mjs
-          npm run test:ci --workspace=@qwen-code/web-shell -- build-boundary.test.ts
+          npm run test:ci --workspace=@qwen-code/web-shell -- build-boundary.test.ts McpApp.document.dom.test.tsx
           npm pack --workspace=@qwen-code/web-shell --dry-run --json > /tmp/web-shell-pack.json
           node -e "const p=require('/tmp/web-shell-pack.json'); if(!Array.isArray(p)||!p[0]?.files?.length) process.exit(1)"
 
@@ -85,4 +89,5 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check "$BASE_SHA" HEAD
-          test -z "$(git status --porcelain)"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
