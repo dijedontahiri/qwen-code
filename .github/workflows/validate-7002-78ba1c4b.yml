@@ -72,9 +72,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          installer=scripts/installation/install-qwen-standalone.sh
           test_file=scripts/tests/install-glibc-preflight.test.js
-          cp "$installer" /tmp/candidate-installer.sh
           python - <<'PY'
           from pathlib import Path
           path = Path('scripts/tests/install-glibc-preflight.test.js')
@@ -103,24 +101,35 @@ jobs:
       - name: Run formatting check
         run: npx prettier --experimental-cli --check scripts/tests/install-glibc-preflight.test.js
 
-      - name: Full repository preflight
-        id: preflight
-        continue-on-error: true
-        shell: bash
+      # The previous exact `npm run preflight` attempt returned non-zero, while
+      # continue-on-error made the Actions step render as successful. Mirror the
+      # documented preflight chain one command per step so the failing component
+      # is identified without treating a skipped tail as a pass.
+      - name: Preflight — clean
+        run: npm run clean
+
+      - name: Preflight — locked install
+        run: npm ci
+
+      - name: Preflight — format
         run: |
-          set -uo pipefail
-          npm run preflight 2>&1 | tee /tmp/preflight.log
-          status=${PIPESTATUS[0]}
-          {
-            echo '### `npm run preflight` tail'
-            echo
-            echo '```text'
-            tail -n 300 /tmp/preflight.log
-            echo '```'
-            echo
-            echo "Exit status: ${status}"
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+          npm run format
+          git diff --exit-code
+
+      - name: Preflight — lint
+        run: npm run lint:ci
+
+      - name: Preflight — build
+        run: npm run build
+
+      - name: Preflight — typecheck
+        run: npm run typecheck
+
+      - name: Preflight — tests
+        run: npm run test:ci
+
+      - name: Preflight — serve fast-path bundle
+        run: npm run check:serve-fast-path-bundle
 
       - name: Final exact-source audit
         if: always()
@@ -132,8 +141,3 @@ jobs:
           test -z "$(git diff --cached --name-only)"
           test -z "$(git ls-files --others --exclude-standard)"
           git diff --check "$PREVIOUS_SHA" HEAD
-
-      - name: Preserve preflight result
-        if: always()
-        shell: bash
-        run: test "${{ steps.preflight.outcome }}" = success
