@@ -1,0 +1,224 @@
+name: OSS isolated test fixture repairs 20260919
+on:
+  push:
+    branches: [validation/oss-repair-20260919-0335-diagnostics]
+    paths: [.github/workflows/oss-repair-test-fixtures-20260919.yml]
+permissions:
+  contents: read
+concurrency:
+  group: oss-isolated-test-fixture-repairs-20260919
+  cancel-in-progress: false
+jobs:
+  repair:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: feishu
+            base: 377a5753a73fb04977c629c835a9f8bbff42848b
+            package: packages/channels/feishu
+            test: src/adapter.test.ts
+            title: dispatches both media and ordinary text
+          - label: focus
+            base: e45362e2c2af9cc765a43c02815c813e9551f53a
+            package: packages/web-shell
+            test: components/BranchPickerPopover.test.tsx
+            title: resets the remotes view and restores no focus after a workspace switch
+    env:
+      CI: true
+      KIND: ${{ matrix.label }}
+      BASE: ${{ matrix.base }}
+      PACKAGE: ${{ matrix.package }}
+      TEST_FILE: ${{ matrix.test }}
+      TEST_TITLE: ${{ matrix.title }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: dijedontahiri/qwen-code
+          ref: ${{ matrix.base }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Record source and applicable repository instructions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence/policy"
+          test "$(git rev-parse HEAD)" = "$BASE"
+          for p in AGENTS.md CONTRIBUTING.md SECURITY.md .github/pull_request_template.md packages/AGENTS.md packages/channels/AGENTS.md packages/channels/feishu/AGENTS.md packages/channels/feishu/src/AGENTS.md packages/web-shell/AGENTS.md packages/web-shell/client/AGENTS.md packages/web-shell/client/components/AGENTS.md; do
+            if [ -f "$p" ]; then mkdir -p "$RUNNER_TEMP/evidence/policy/$(dirname "$p")"; cp "$p" "$RUNNER_TEMP/evidence/policy/$p"; cat "$p"; fi
+          done
+          printf '%s\n' "$BASE" > "$RUNNER_TEMP/evidence/base.txt"
+          node --version > "$RUNNER_TEMP/evidence/node.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fixture-repair-policy-${{ matrix.label }}
+          path: ${{ runner.temp }}/evidence/policy/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Install normal workspace dependencies
+        shell: bash
+        run: |
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/evidence/install.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/evidence/install.log"; exit 1; }
+      - name: Reproduce timing or network failure and test the minimum fixture correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/repair-fixture.py" <<'PY'
+          import hashlib,json,os,pathlib,subprocess
+          root=pathlib.Path.cwd();out=pathlib.Path(os.environ['RUNNER_TEMP'])/'evidence'
+          kind=os.environ['KIND'];package=os.environ['PACKAGE'];title=os.environ['TEST_TITLE']
+          if kind=='feishu':
+            path=pathlib.Path('packages/channels/feishu/src/adapter.test.ts')
+            expected='64cacdb82c916d7af47ce051bda50399a270b90e'
+          else:
+            path=pathlib.Path('packages/web-shell/client/components/BranchPickerPopover.test.tsx')
+            expected='4efab3a308f335c04224fe7017d51a18555188b8'
+          actual=subprocess.check_output(['git','hash-object',str(path)],text=True).strip()
+          assert actual==expected,(actual,expected)
+          original=path.read_text();marker="  it('"+title+"', async () => {"
+          assert original.count(marker)==1
+          start=original.index(marker);end=original.index("\n  it('",start+len(marker))
+          before,block,after=original[:start],original[start:end],original[end:]
+          component=pathlib.Path('packages/web-shell/client/components/BranchPickerPopover.tsx')
+          component_original=component.read_text() if kind=='focus' else None
+          if kind=='feishu':
+            anchor="    const channel = new FeishuChannel('test', createConfig(), bridge);"
+            assert block.count(anchor)==1
+            fixed=block.replace(anchor,anchor+"\n    // Dispatch must not depend on a live request with dummy app credentials.\n    Object.assign(channel, {\n      getTenantAccessToken: vi.fn().mockResolvedValue(null),\n    });")
+            control="\n    const externalFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(\n      () => new Promise<Response>((_resolve, reject) => {\n        setTimeout(() => reject(new Error('controlled slow Feishu transport')), 1500);\n      }),\n    );"
+            def controlled(text):
+              return text.replace(marker,marker+control).replace("    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));","    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));\n    expect(externalFetch).not.toHaveBeenCalled();")
+          else:
+            anchor='    const activeBefore = document.activeElement;'
+            assert block.count(anchor)==1
+            fixed=block.replace(anchor,"    // Settle this workspace's independent open-focus timer before measuring\n    // whether the stale mutation moves focus. Keep the identity assertion.\n    const search = document.body.querySelector<HTMLInputElement>(\n      'input[placeholder=\"Search for branches and actions\"]',\n    );\n    expect(search).not.toBeNull();\n    await vi.waitFor(() => expect(document.activeElement).toBe(search));\n"+anchor)
+            timer='setTimeout(() => searchRef.current?.focus(), 50);'
+            assert component_original.count(timer)==1
+            component.write_text(component_original.replace(timer,'setTimeout(() => searchRef.current?.focus(), 200);'))
+            def controlled(text):
+              return text.replace(anchor,anchor+"\n    await act(async () => {\n      await new Promise((resolve) => setTimeout(resolve, 300));\n    });")
+          command=['node',str(root/'node_modules/vitest/vitest.mjs'),'run',os.environ['TEST_FILE'],'-t',title,'--retry=0']
+          def run(label):
+            with (out/(label+'.log')).open('w') as stream:
+              result=subprocess.run(command,cwd=package,stdout=stream,stderr=subprocess.STDOUT,timeout=120)
+            return result.returncode
+          try:
+            path.write_text(before+controlled(block)+after)
+            negative=run('controlled-original')
+            negative_log=(out/'controlled-original.log').read_text()
+            assert negative!=0,'Controlled original did not reproduce; no fix is accepted.'
+            assert title in negative_log and ('AssertionError' in negative_log or 'toBe' in negative_log),negative_log[-5000:]
+            if kind=='feishu': assert 'but got 0 times' in negative_log,negative_log[-5000:]
+            path.write_text(before+controlled(fixed)+after)
+            positive=run('controlled-fixed')
+            assert positive==0,(out/'controlled-fixed.log').read_text()[-10000:]
+          finally:
+            if component_original is not None: component.write_text(component_original)
+            path.write_text(before+fixed+after)
+          (out/'candidate-manifest.json').write_text(json.dumps({'base':os.environ['BASE'],'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'negative_exit':negative,'positive_exit':positive},indent=2))
+          (out/'candidate.patch').write_bytes(subprocess.check_output(['git','diff','--',str(path)]))
+          assert subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()==[str(path)]
+          print('CONTROLLED ORIGINAL FAILED; SAME CONTROL WITH FIX PASSED. Test assertions were retained.')
+          PY
+          python3 "$RUNNER_TEMP/repair-fixture.py"
+      - name: Run the complete affected package twice with normal source and no retries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PACKAGE"
+          for pass in 1 2; do
+            node "$GITHUB_WORKSPACE/node_modules/vitest/vitest.mjs" run --retry=0 > "$RUNNER_TEMP/evidence/package-$pass.log" 2>&1 || { tail -n 140 "$RUNNER_TEMP/evidence/package-$pass.log"; exit 1; }
+            tail -n 12 "$RUNNER_TEMP/evidence/package-$pass.log"
+          done
+      - name: Check exact candidate scope, formatting, lint and package types
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = feishu ]; then path=packages/channels/feishu/src/adapter.test.ts; else path=packages/web-shell/client/components/BranchPickerPopover.test.tsx; fi
+          node node_modules/prettier/bin/prettier.cjs --check "$path" > "$RUNNER_TEMP/evidence/format.log" 2>&1 || { cat "$RUNNER_TEMP/evidence/format.log"; exit 1; }
+          node node_modules/eslint/bin/eslint.js "$path" > "$RUNNER_TEMP/evidence/lint.log" 2>&1 || { cat "$RUNNER_TEMP/evidence/lint.log"; exit 1; }
+          if [ "$KIND" = feishu ]; then npm run build --workspace=@qwen-code/channel-feishu > "$RUNNER_TEMP/evidence/types.log" 2>&1; else npm run typecheck --workspace=@qwen-code/web-shell > "$RUNNER_TEMP/evidence/types.log" 2>&1; fi
+          git diff --check
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'evidence';m=json.loads((out/'candidate-manifest.json').read_text())
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==m['base']
+          assert subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()==[m['path']]
+          assert hashlib.sha256(pathlib.Path(m['path']).read_bytes()).hexdigest()==m['sha256']
+          assert subprocess.check_output(['git','diff','--cached','--name-only'],text=True).strip()==''
+          assert subprocess.check_output(['git','ls-files','--others','--exclude-standard'],text=True).strip()==''
+          (out/'verified.txt').write_text('Controlled before/after, two unchanged-command package runs, formatting, lint, types and exact candidate scope passed. Full repository preflight was not run; this is an independent preparation branch, not upstream acceptance.\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-fixture-repair-${{ matrix.label }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 7
+          if-no-files-found: error
+  publish_preparation:
+    needs: repair
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: feishu
+            base: 377a5753a73fb04977c629c835a9f8bbff42848b
+            branch: repair/20260919-feishu-dispatch-test-isolation
+            path: packages/channels/feishu/src/adapter.test.ts
+            message: 'test(feishu): isolate dispatch from live token requests'
+          - label: focus
+            base: e45362e2c2af9cc765a43c02815c813e9551f53a
+            branch: repair/20260919-branch-picker-focus-test
+            path: packages/web-shell/client/components/BranchPickerPopover.test.tsx
+            message: 'test(web-shell): settle opening focus before stale mutation checks'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: dijedontahiri/qwen-code
+          ref: ${{ matrix.base }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-fixture-repair-${{ matrix.label }}
+          path: ${{ runner.temp }}/verified
+      - name: Publish only the verified one-file independent candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ matrix.base }}
+          BRANCH: ${{ matrix.branch }}
+          EXPECTED_PATH: ${{ matrix.path }}
+          MESSAGE: ${{ matrix.message }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$RUNNER_TEMP/verified/verified.txt"
+          gh auth setup-git
+          test "$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)" = "$BASE"
+          git apply --index "$RUNNER_TEMP/verified/candidate.patch"
+          git diff --cached --check
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,subprocess
+          m=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'verified/candidate-manifest.json').read_text())
+          assert m['base']==os.environ['BASE'] and m['path']==os.environ['EXPECTED_PATH']
+          assert hashlib.sha256(pathlib.Path(m['path']).read_bytes()).hexdigest()==m['sha256']
+          assert subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines()==[m['path']]
+          assert subprocess.check_output(['git','diff','--name-only'],text=True).strip()==''
+          PY
+          git config user.name 'Dijedon Tahiri'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          git commit -m "$MESSAGE" -m "AI-assisted isolated repair preparation. Controlled original failure, same-control fix success, two complete package runs, lint, formatting and type checks are recorded in workflow run $GITHUB_RUN_ID. Full repository preflight and upstream review remain outstanding. Existing contribution branches are not modified."
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)" = "$(git rev-parse HEAD)"
+          git show --stat --oneline HEAD
