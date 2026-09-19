@@ -1,0 +1,98 @@
+name: Validate issue 12151 reuse-floor repair
+
+on:
+  push:
+    branches: [validation/12151-eaccac9b-r12]
+    paths: [.github/workflows/validate-12151-eaccac9b.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CANDIDATE_SHA: eaccac9bce597efa24dcc4fd56d108e5a1ff8456
+      PREVIOUS_SHA: 2203d1380c179927770c4970b7a43d9e0b1ed729
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source and repair scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PREVIOUS_SHA"
+          git diff --check "$PREVIOUS_SHA" HEAD
+          test "$(git diff --name-only "$PREVIOUS_SHA" HEAD)" = 'packages/core/src/utils/git-ignore-parser-cache.test.ts'
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build workspace prerequisites
+        run: npm run build
+
+      - name: Prove the reuse floor rejects an over-aggressive rollover
+        shell: bash
+        run: |
+          set -euo pipefail
+          production=packages/core/src/utils/gitIgnoreParser.ts
+          cp "$production" /tmp/gitIgnoreParser.ts
+          perl -0pi -e 's/MATCHER_CACHE_RESET_INTERVAL = 10_000/MATCHER_CACHE_RESET_INTERVAL = 100/' "$production"
+          set +e
+          (cd packages/core && npx vitest run src/utils/git-ignore-parser-cache.test.ts -t 'keeps the matcher cache reset interval within the retention budget') > /tmp/reuse-floor-negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F 'keeps the matcher cache reset interval within the retention budget' /tmp/reuse-floor-negative.log
+          cp /tmp/gitIgnoreParser.ts "$production"
+          git diff --exit-code -- "$production"
+
+      - name: Run focused parser suites
+        run: cd packages/core && npx vitest run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts --retry=0
+
+      - name: Verify no-AK CI wiring
+        run: npm run test:scripts
+
+      - name: Build bundle
+        run: npm run bundle
+
+      - name: Run real CLI regression with retained output
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEEP_OUTPUT=true node node_modules/vitest/vitest.mjs run --root ./integration-tests cli/glob-ignore-cache.test.ts --retry=0
+          if find .integration-tests -type d -name scratch -print -quit | grep -q .; then
+            echo 'scratch fixture was retained under KEEP_OUTPUT=true' >&2
+            exit 1
+          fi
+          rm -rf .integration-tests
+
+      - name: Full repository preflight
+        run: npm run preflight
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PREVIOUS_SHA" HEAD
