@@ -2,8 +2,11 @@ from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
+mode = sys.argv[2] if len(sys.argv) > 2 else 'patch'
 source = path.read_text()
-old_budget = """// Last measured at 1,833,894 bytes of JS with 2,302,905 bytes of CSS moved
+
+if mode == 'patch':
+    old_budget = """// Last measured at 1,833,894 bytes of JS with 2,302,905 bytes of CSS moved
 // out, by the Lint & Static lane on this branch. Before the split that lane
 // measured the combined bundle at 4,133,282 bytes on main at c3023b3e6d — the
 // measurement #11372 raised these two constants for, and which this branch
@@ -14,7 +17,7 @@ old_budget = """// Last measured at 1,833,894 bytes of JS with 2,302,905 bytes o
 const DOCUMENT_RUNTIME_WARNING_BYTES = 1_870_000;
 const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;
 """
-new_budget = """// Measured at 1,806,361 bytes of JS on the manifest-externalized document
+    new_budget = """// Measured at 1,806,361 bytes of JS on the manifest-externalized document
 // build with the document MCP bridge substitution engaged. A review control
 // with that substitution removed measured 2,111,566 bytes. Keep the warning
 // close to the healthy measurement and the hard ceiling close above it: a cap
@@ -23,11 +26,11 @@ new_budget = """// Measured at 1,806,361 bytes of JS on the manifest-externalize
 const DOCUMENT_RUNTIME_WARNING_BYTES = 1_830_000;
 const MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000;
 """
-if source.count(old_budget) != 1:
-    raise SystemExit('budget block drifted')
-source = source.replace(old_budget, new_budget)
-needle = "const documentInputs = documentBuildResult.metafile.inputs;\n"
-guard = """const documentInputs = documentBuildResult.metafile.inputs;
+    if source.count(old_budget) != 1:
+        raise SystemExit('budget block drifted')
+    source = source.replace(old_budget, new_budget)
+    needle = "const documentInputs = documentBuildResult.metafile.inputs;\n"
+    guard = """const documentInputs = documentBuildResult.metafile.inputs;
 const documentMcpBridgeStubEngaged = Object.keys(documentInputs).some((input) =>
   input
     .replaceAll('\\\\', '/')
@@ -40,6 +43,19 @@ if (!documentMcpBridgeStubEngaged) {
   );
 }
 """
-if source.count(needle) != 1:
-    raise SystemExit('documentInputs declaration drifted')
-path.write_text(source.replace(needle, guard))
+    if source.count(needle) != 1:
+        raise SystemExit('documentInputs declaration drifted')
+    source = source.replace(needle, guard)
+elif mode == 'remove-resolver':
+    resolver = """    build.onResolve(
+      { filter: /^@modelcontextprotocol\\/ext-apps\\/app-bridge$/ },
+      () => ({ path: documentMcpAppBridgeStub }),
+    );
+"""
+    if source.count(resolver) != 1:
+        raise SystemExit('MCP resolver block drifted')
+    source = source.replace(resolver, '')
+else:
+    raise SystemExit(f'unknown mode: {mode}')
+
+path.write_text(source)
