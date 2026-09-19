@@ -1,0 +1,94 @@
+name: Isolate PR 12191 focused regression failure
+
+on:
+  push:
+    branches: [validation/12191-4508cb2e-r12]
+    paths: [.github/workflows/validate-12191-focused-isolation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  isolate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      SOURCE_SHA: 4508cb2e0512d63392808ac6eb9a35de7ef734ff
+    steps:
+      - name: Check out immutable product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+
+      - name: Verify immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build SDK and Web Shell
+        run: |
+          npm run build --workspace=@qwen-code/sdk
+          npm run build --workspace=@qwen-code/web-shell
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+
+      - id: externalization
+        name: Package externalization artifact regression
+        continue-on-error: true
+        run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/package-externalization.artifact.test.ts --coverage.enabled=false --retry=0
+
+      - id: boundary
+        name: Build boundary regression
+        continue-on-error: true
+        run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-boundary.test.ts --coverage.enabled=false --retry=0
+
+      - id: document
+        name: MCP document DOM regression
+        continue-on-error: true
+        run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/components/messages/McpApp.document.dom.test.tsx --coverage.enabled=false --retry=0
+
+      - id: artifact
+        name: Existing build artifact regression
+        continue-on-error: true
+        run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-artifact.test.ts --coverage.enabled=false --retry=0
+
+      - name: Require every isolated regression to pass
+        if: always()
+        shell: bash
+        env:
+          EXTERNALIZATION: ${{ steps.externalization.outcome }}
+          BOUNDARY: ${{ steps.boundary.outcome }}
+          DOCUMENT: ${{ steps.document.outcome }}
+          ARTIFACT: ${{ steps.artifact.outcome }}
+        run: |
+          set -euo pipefail
+          printf 'externalization=%s\nboundary=%s\ndocument=%s\nartifact=%s\n' "$EXTERNALIZATION" "$BOUNDARY" "$DOCUMENT" "$ARTIFACT"
+          test "$EXTERNALIZATION" = success
+          test "$BOUNDARY" = success
+          test "$DOCUMENT" = success
+          test "$ARTIFACT" = success
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
