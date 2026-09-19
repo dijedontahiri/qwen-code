@@ -1,0 +1,122 @@
+name: Validate 12151 R6
+
+on:
+  push:
+    branches:
+      - validation/12151-r6-20260919
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: bd5ba8cb5363e055adc38093d0425e0316b240f7
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "bd5ba8cb5363e055adc38093d0425e0316b240f7"
+          test "$(git rev-parse HEAD^)" = "67347844f529b3ddda4e5816cfc9e7a101007c78"
+          git diff --check HEAD^
+          test -z "$(git status --porcelain --untracked-files=no)"
+
+      - name: Install dependencies
+        run: node scripts/setup-worktree.js
+
+      - name: Build workspace and classify known unrelated blocker
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          npm run build >/tmp/workspace-build.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -q 'Document export renderer JS is' /tmp/workspace-build.log
+          grep -q 'expected <= 1930000' /tmp/workspace-build.log
+          tail -n 30 /tmp/workspace-build.log
+
+      - name: Prove retention-bound negative control
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp packages/core/src/utils/gitIgnoreParser.ts /tmp/gitIgnoreParser.ts
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/core/src/utils/gitIgnoreParser.ts')
+          s = p.read_text()
+          old = 'export const MATCHER_CACHE_RESET_INTERVAL = 10_000;'
+          new = 'export const MATCHER_CACHE_RESET_INTERVAL = 50_000;'
+          if old not in s:
+              raise SystemExit('production interval declaration not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          set +e
+          (cd packages/core && npx vitest run src/utils/git-ignore-parser-cache.test.ts --maxWorkers=1) >/tmp/negative.log 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -q 'expected 50000 to be less than or equal to 10000' /tmp/negative.log
+          mv /tmp/gitIgnoreParser.ts packages/core/src/utils/gitIgnoreParser.ts
+
+      - name: Focused regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd packages/core && npx vitest run src/utils/gitIgnoreParser.test.ts src/utils/git-ignore-parser-cache.test.ts --maxWorkers=1)
+          npm run test:scripts -- scripts/tests/no-ak-integration-ci.test.js
+
+      - name: Lint and format changed sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          node node_modules/prettier/bin/prettier.cjs --check \
+            packages/core/src/utils/git-ignore-parser-cache.test.ts \
+            integration-tests/cli/glob-ignore-cache.test.ts \
+            docs/developers/development/gitignore-cache.md
+          node node_modules/eslint/bin/eslint.js \
+            packages/core/src/utils/git-ignore-parser-cache.test.ts \
+            integration-tests/cli/glob-ignore-cache.test.ts \
+            --max-warnings 0
+
+      - name: Bundle CLI from produced workspace artifacts
+        run: npm run bundle
+
+      - name: Real bundled CLI regression and KEEP_OUTPUT audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .integration-tests
+          CI=true KEEP_OUTPUT=true QWEN_SANDBOX=false QWEN_DEBUG_LOG_FILE=0 \
+            node node_modules/vitest/vitest.mjs run --root ./integration-tests \
+            cli/glob-ignore-cache.test.ts --retry=0
+          if find .integration-tests -type d -name scratch -print -quit | grep -q .; then
+            echo 'scratch fixture was retained under KEEP_OUTPUT=true' >&2
+            exit 1
+          fi
+
+      - name: Final source audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "bd5ba8cb5363e055adc38093d0425e0316b240f7"
+          git diff --check HEAD^
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          if git status --porcelain --untracked-files=all | grep -vE '^\?\? \.integration-tests/' | grep -q .; then
+            git status --short
+            exit 1
+          fi
