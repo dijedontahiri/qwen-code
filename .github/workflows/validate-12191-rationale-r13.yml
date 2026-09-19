@@ -1,0 +1,85 @@
+name: Validate PR 12191 rationale repair
+
+on:
+  push:
+    branches: [validation/12191-9efce16d-r13]
+    paths: [.github/workflows/validate-12191-rationale-r13.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      CANDIDATE_SHA: 9efce16d482095b24d155513c0e6e513a12bfbdb
+      PREVIOUS_SHA: 5d004749bef5914c44a265c79f81bd97bd463ba6
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 30
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source and review-repair scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --check "$PREVIOUS_SHA" HEAD
+          actual=$(git diff --name-only "$PREVIOUS_SHA" HEAD | sort)
+          expected=$(printf '%s\n' \
+            packages/web-shell/vite.config.ts \
+            packages/web-shell/vite.lib.config.ts \
+            scripts/tests/web-terminal-build.test.ts | sort)
+          test "$actual" = "$expected"
+          # This review repair must remain documentation-only.
+          git diff --unified=0 "$PREVIOUS_SHA" HEAD -- \
+            packages/web-shell/vite.config.ts \
+            packages/web-shell/vite.lib.config.ts \
+            scripts/tests/web-terminal-build.test.ts > /tmp/review.diff
+          if grep -E '^[+-][^+-]' /tmp/review.diff | grep -Ev '^[+-][[:space:]]*(//|\*|$)' >/dev/null; then
+            echo 'non-comment source changed in rationale repair' >&2
+            cat /tmp/review.diff
+            exit 1
+          fi
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build workspace
+        run: npm run build
+
+      - name: Run build-target regression
+        run: npm run test:scripts -- scripts/tests/web-terminal-build.test.ts
+
+      - name: Check formatting of changed files
+        run: npx prettier --experimental-cli --check packages/web-shell/vite.config.ts packages/web-shell/vite.lib.config.ts scripts/tests/web-terminal-build.test.ts
+
+      - name: Run Web Shell typecheck
+        run: npm run typecheck --workspace @qwen-code/web-shell
+
+      - name: Run full repository preflight
+        run: npm run preflight
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PREVIOUS_SHA" HEAD
