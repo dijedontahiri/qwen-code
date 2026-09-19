@@ -1,0 +1,69 @@
+name: Validate issue 12185 exact source
+
+on:
+  push:
+    branches:
+      - validation/12185-f17370c0
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CANDIDATE_SHA: f17370c06965f27d6b82ec14fbae855293f83f93
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --check HEAD^
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install repository dependencies
+        run: node scripts/setup-worktree.js
+
+      - name: Build workspace prerequisites
+        run: npm run build
+
+      - name: Verify Web Shell package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build --workspace=@qwen-code/web-shell
+          node packages/web-shell/scripts/verify-package.mjs
+          npm run test:ci --workspace=@qwen-code/web-shell -- build-boundary.test.ts McpApp.document.dom.test.tsx
+          npm pack --workspace=@qwen-code/web-shell --dry-run --json > /tmp/web-shell-pack.json
+          node -e "const p=require('/tmp/web-shell-pack.json'); if(!Array.isArray(p)||!p[0]?.files?.length) process.exit(1)"
+
+      - name: Recheck BranchPicker focus regression
+        run: cd packages/web-shell && npx vitest run client/components/BranchPickerPopover.test.tsx --retry=0
+
+      - name: Full repository preflight
+        run: npm run preflight
+
+      - name: Final exact-source audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
