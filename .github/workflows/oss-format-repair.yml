@@ -1,0 +1,75 @@
+name: Verify isolated Web Shell format repair
+
+on:
+  push:
+    branches: [validation/oss-followup-20260919-audit]
+    paths: [.github/workflows/oss-format-repair.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  format-proof:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SOURCE_SHA: 4508cb2e0512d63392808ac6eb9a35de7ef734ff
+      TARGET: packages/web-shell/client/package-externalization.artifact.test.ts
+    steps:
+      - name: Check out immutable product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Install only the exact locked formatter and compiler outside the source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          prettier_version=$(node -p "JSON.parse(require('fs').readFileSync('package-lock.json','utf8')).packages['node_modules/prettier'].version")
+          typescript_version=$(node -p "JSON.parse(require('fs').readFileSync('package-lock.json','utf8')).packages['node_modules/typescript'].version")
+          echo "Locked tools: prettier=$prettier_version typescript=$typescript_version"
+          npm install --prefix "$RUNNER_TEMP/format-tools" --ignore-scripts --no-audit --no-fund --package-lock=false "prettier@$prettier_version" "typescript@$typescript_version"
+      - name: Reproduce the formatting failure and verify the correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          formatter="$RUNNER_TEMP/format-tools/node_modules/.bin/prettier"
+          set +e
+          "$formatter" --experimental-cli --check packages/web-shell > "$RUNNER_TEMP/before-format.log" 2>&1
+          before=$?
+          set -e
+          cat "$RUNNER_TEMP/before-format.log"
+          test "$before" -eq 1
+          grep -F "$TARGET" "$RUNNER_TEMP/before-format.log"
+          "$formatter" --experimental-cli --write "$TARGET"
+          "$formatter" --experimental-cli --check packages/web-shell
+          test "$(git diff --name-only)" = "$TARGET"
+          git diff --check
+          node <<'JS'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          const ts = require(process.env.RUNNER_TEMP + '/format-tools/node_modules/typescript');
+          const file = process.env.TARGET;
+          const before = execFileSync('git', ['show', process.env.SOURCE_SHA + ':' + file], { encoding: 'utf8' });
+          const after = fs.readFileSync(file, 'utf8');
+          const compile = (source) => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext }, reportDiagnostics: true });
+          const original = compile(before);
+          const formatted = compile(after);
+          assert.equal(original.diagnostics.length, 0);
+          assert.equal(formatted.diagnostics.length, 0);
+          assert.equal(original.outputText, formatted.outputText);
+          assert.notEqual(before, after);
+          console.log('IDENTICAL_COMPILED_JAVASCRIPT: true');
+          console.log('FORMATTED_SOURCE_START\n' + after + 'FORMATTED_SOURCE_END');
+          JS
+          git diff -- "$TARGET"
+          echo "FORMATTED_BLOB=$(git hash-object "$TARGET")"
+          echo 'FORMAT_PROOF_COMPLETE: formatting only; full product acceptance is not claimed.'
