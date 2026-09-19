@@ -50,6 +50,10 @@ describe('GitIgnoreParser cache retention', () => {
   });
 
   it('bounds matcher caches while retaining pattern lookup memos across a large scan', () => {
+    // Keep the production retention budget from silently growing with tests
+    // that derive their loop sizes from the same constant.
+    expect(MATCHER_CACHE_RESET_INTERVAL).toBeLessThanOrEqual(10_000);
+
     for (let i = 0; i < LOOKUP_WINDOW + 5; i++) {
       expect(parser.isIgnored(`scratch-${i}/result.log`)).toBe(true);
     }
