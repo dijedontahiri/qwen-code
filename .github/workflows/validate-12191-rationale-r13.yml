@@ -70,8 +70,29 @@ jobs:
       - name: Run Web Shell typecheck
         run: npm run typecheck --workspace @qwen-code/web-shell
 
-      - name: Run full repository preflight
-        run: npm run preflight
+      - name: Preflight clean
+        run: npm run clean
+
+      - name: Preflight install
+        run: npm ci
+
+      - name: Preflight format
+        run: npm run format
+
+      - name: Preflight lint
+        run: npm run lint:ci
+
+      - name: Preflight build
+        run: npm run build
+
+      - name: Preflight typecheck
+        run: npm run typecheck
+
+      - name: Preflight tests
+        run: npm run test:ci
+
+      - name: Preflight serve fast-path check
+        run: npm run check:serve-fast-path-bundle
 
       - name: Final exact-source audit
         if: always()
