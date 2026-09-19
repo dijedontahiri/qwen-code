@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 90
     env:
       CI: 'true'
-      SOURCE_SHA: 4508cb2e0512d63392808ac6eb9a35de7ef734ff
+      SOURCE_SHA: 5d004749bef5914c44a265c79f81bd97bd463ba6
     steps:
       - name: Check out immutable product candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
