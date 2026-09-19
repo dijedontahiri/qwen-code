@@ -33,9 +33,10 @@ jobs:
               ('dijedontahiri/qwen-code', 105916960256),
               ('strapi/strapi', 105660843251),
           ]
+          read_count = 0
           for repo, job in jobs:
               print('READ_EXISTING_JOB', repo, job, flush=True)
-              result = subprocess.run(['gh', 'api', f'repos/{repo}/actions/jobs/{job}/logs'], capture_output=True, timeout=90)
+              result = subprocess.run(['gh', 'api', '--allow-escape-sequences', f'repos/{repo}/actions/jobs/{job}/logs'], capture_output=True, timeout=90)
               if result.returncode:
                   print('READ_ERROR', result.stderr.decode(errors='replace')[-600:])
                   continue
@@ -52,5 +53,8 @@ jobs:
                   selected.update(range(max(0, len(lines)-60), len(lines)))
               output = '\n'.join(lines[i] for i in sorted(selected))
               print(output[-14000:])
-          print('LOG_DETAILS_COMPLETE: no test or product changes.')
+              read_count += 1
+          print(f'LOG_READ_COUNT {read_count}/{len(jobs)}; no test or product changes.')
+          if read_count != len(jobs):
+              raise SystemExit(1)
           PYTHON
