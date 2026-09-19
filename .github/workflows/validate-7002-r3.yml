@@ -47,20 +47,18 @@ jobs:
           cp scripts/tests/install-glibc-preflight.test.js /tmp/candidate-test.js
           python3 - <<'PY'
           from pathlib import Path
+          import re
           p = Path('scripts/installation/install-qwen-standalone.sh')
           s = p.read_text()
-          old = '''if [[ "${METHOD}" == "detect" ]]; then
-                        return 2
-                    fi
-                    return 1'''
-          new = '''if [[ "${METHOD}" == "detect" ]]; then
-                        return 2
-                    fi
-                    return 7'''
-          count = s.count(old)
+          pattern = re.compile(
+              r'(log_warning "Failed to download standalone archive\."\n'
+              r'\s+if \[\[ "\$\{METHOD\}" == "detect" \]\]; then\n'
+              r'\s+return 2\n\s+fi\n\s+)return 1'
+          )
+          s, count = pattern.subn(lambda m: m.group(1) + 'return 7', s)
           if count < 1:
               raise SystemExit('standalone download failure branch not found')
-          p.write_text(s.replace(old, new))
+          p.write_text(s)
           print(f'mutated {count} standalone download failure branches')
           PY
           npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js
