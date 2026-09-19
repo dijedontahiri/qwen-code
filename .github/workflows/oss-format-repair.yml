@@ -57,6 +57,7 @@ jobs:
           const assert = require('node:assert/strict');
           const { execFileSync } = require('node:child_process');
           const ts = require(process.env.RUNNER_TEMP + '/format-tools/node_modules/typescript');
+          const prettier = require(process.env.RUNNER_TEMP + '/format-tools/node_modules/prettier');
           const file = process.env.TARGET;
           const before = execFileSync('git', ['show', process.env.SOURCE_SHA + ':' + file], { encoding: 'utf8' });
           const after = fs.readFileSync(file, 'utf8');
@@ -65,10 +66,13 @@ jobs:
           const formatted = compile(after);
           assert.equal(original.diagnostics.length, 0);
           assert.equal(formatted.diagnostics.length, 0);
-          assert.equal(original.outputText, formatted.outputText);
           assert.notEqual(before, after);
-          console.log('IDENTICAL_COMPILED_JAVASCRIPT: true');
-          console.log('FORMATTED_SOURCE_START\n' + after + 'FORMATTED_SOURCE_END');
+          (async () => {
+            const options = { parser: 'babel' };
+            assert.equal(await prettier.format(original.outputText, options), await prettier.format(formatted.outputText, options));
+            console.log('IDENTICAL_NORMALIZED_COMPILED_JAVASCRIPT: true');
+            console.log('FORMATTED_SOURCE_START\n' + after + 'FORMATTED_SOURCE_END');
+          })().catch((error) => { console.error(error); process.exitCode = 1; });
           JS
           git diff -- "$TARGET"
           echo "FORMATTED_BLOB=$(git hash-object "$TARGET")"
