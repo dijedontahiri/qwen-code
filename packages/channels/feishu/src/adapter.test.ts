@@ -725,6 +725,10 @@ describe('FeishuChannel', () => {
   it('dispatches both media and ordinary text', async () => {
     const bridge = createMockBridge();
     const channel = new FeishuChannel('test', createConfig(), bridge);
+    // Dispatch must not depend on a live request with dummy app credentials.
+    Object.assign(channel, {
+      getTenantAccessToken: vi.fn().mockResolvedValue(null),
+    });
     const onMessage = getPrivateMethod<(data: unknown) => void>(
       channel,
       'onMessage',
