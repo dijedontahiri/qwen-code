@@ -36,6 +36,9 @@ jobs:
       - name: Install dependencies
         run: node scripts/setup-worktree.js
 
+      - name: Build workspace prerequisites
+        run: npm run build
+
       - name: Focused installer tests
         run: npm run test:scripts -- scripts/tests/install-glibc-preflight.test.js scripts/tests/install-script.test.js
 
