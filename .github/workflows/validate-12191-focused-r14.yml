@@ -1,0 +1,70 @@
+name: Isolate PR 12191 focused failure
+
+on:
+  push:
+    branches: [validation/12191-document-boundary-r14]
+    paths: [.github/workflows/validate-12191-focused-r14.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  isolate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      SOURCE_SHA: 8693670948b949b7d01605389802dfb743e35609
+      PREVIOUS_SHA: 4508cb2e0512d63392808ac6eb9a35de7ef734ff
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Setup Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PREVIOUS_SHA"
+          test "$(git diff --name-only "$PREVIOUS_SHA" HEAD)" = 'packages/web-templates/src/export-html/build.mjs'
+          git diff --check "$PREVIOUS_SHA" HEAD
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build SDK and Web Shell
+        run: |
+          npm run build --workspace=@qwen-code/sdk
+          npm run build --workspace=@qwen-code/web-shell
+      - name: Focused — package externalization artifact
+        run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/package-externalization.artifact.test.ts --coverage.enabled=false --retry=0
+      - name: Focused — build boundary
+        run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-boundary.test.ts --coverage.enabled=false --retry=0
+      - name: Focused — MCP document DOM
+        run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/components/messages/McpApp.document.dom.test.tsx --coverage.enabled=false --retry=0
+      - name: Focused — built artifact
+        run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-artifact.test.ts --coverage.enabled=false --retry=0
+      - name: Web Shell typecheck
+        run: npm run typecheck --workspace=@qwen-code/web-shell
+      - name: Web Shell lint
+        run: npm run lint --workspace=@qwen-code/web-shell
+      - name: Web Shell format
+        run: npm run format:check --workspace=@qwen-code/web-shell
+      - name: Document builder formatting
+        run: npx prettier --experimental-cli --check packages/web-templates/src/export-html/build.mjs
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$PREVIOUS_SHA" HEAD
