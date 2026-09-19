@@ -1,4 +1,4 @@
-name: Isolate PR 12191 focused regression failure
+name: Validate PR 12191 exact source
 
 on:
   push:
@@ -9,10 +9,10 @@ permissions:
   contents: read
 
 jobs:
-  isolate:
+  validate:
     if: github.repository == 'dijedontahiri/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       CI: 'true'
       SOURCE_SHA: 4508cb2e0512d63392808ac6eb9a35de7ef734ff
@@ -67,8 +67,7 @@ jobs:
         continue-on-error: true
         run: npm exec --workspace=@qwen-code/web-shell -- vitest run --config vitest.config.ts client/build-artifact.test.ts --coverage.enabled=false --retry=0
 
-      - name: Require every isolated regression to pass
-        if: always()
+      - name: Require every focused regression to pass
         shell: bash
         env:
           EXTERNALIZATION: ${{ steps.externalization.outcome }}
@@ -82,6 +81,86 @@ jobs:
           test "$BOUNDARY" = success
           test "$DOCUMENT" = success
           test "$ARTIFACT" = success
+
+      - id: typecheck
+        name: Web Shell typecheck
+        continue-on-error: true
+        run: npm run typecheck --workspace=@qwen-code/web-shell
+
+      - id: lint
+        name: Web Shell lint
+        continue-on-error: true
+        run: npm run lint --workspace=@qwen-code/web-shell
+
+      - id: format
+        name: Web Shell format check
+        continue-on-error: true
+        run: npm run format:check --workspace=@qwen-code/web-shell
+
+      - name: Require every Web Shell quality check to pass
+        shell: bash
+        env:
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          FORMAT: ${{ steps.format.outcome }}
+        run: |
+          set -euo pipefail
+          printf 'typecheck=%s\nlint=%s\nformat=%s\n' "$TYPECHECK" "$LINT" "$FORMAT"
+          test "$TYPECHECK" = success
+          test "$LINT" = success
+          test "$FORMAT" = success
+
+      - name: Verify document export boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_HTML_METAFILE=/tmp/document-metafile.json node packages/web-templates/src/export-html/build.mjs
+          document=packages/web-templates/src/export-html/dist/export-transcript-document.js
+          bytes=$(wc -c < "$document")
+          echo "document bytes: $bytes"
+          test "$bytes" -le 1930000
+          if grep -Fq 'node_modules/@modelcontextprotocol/' /tmp/document-metafile.json; then
+            echo 'MCP Apps runtime leaked into static document inputs' >&2
+            exit 1
+          fi
+
+      - name: Pack and verify publication boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/packs /tmp/packed-web /tmp/consumer
+          mkdir -p /tmp/packs /tmp/packed-web /tmp/consumer/node_modules/@qwen-code
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          npm pack --workspace=packages/web-shell --pack-destination /tmp/packs >/tmp/web-pack-name.txt
+          web_tgz=$(find /tmp/packs -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)
+          test -n "$web_tgz"
+          tar -xzf "$web_tgz" -C /tmp/packed-web
+          for target in dist/index.js dist/transcript.js dist/daemon-react-sdk.js dist/types/index.d.ts dist/types/transcript.d.ts dist/types/daemon-react-sdk.d.ts; do
+            test -f "/tmp/packed-web/package/$target"
+          done
+          if grep -R -n -E "['\"]@/" /tmp/packed-web/package/dist/types; then
+            echo 'repository alias leaked into packed declarations' >&2
+            exit 1
+          fi
+          ln -s /tmp/packed-web/package /tmp/consumer/node_modules/@qwen-code/web-shell
+          cd /tmp/consumer
+          node --input-type=module - <<'JS'
+          for (const specifier of [
+            '@qwen-code/web-shell',
+            '@qwen-code/web-shell/transcript',
+            '@qwen-code/web-shell/daemon-react-sdk',
+          ]) {
+            const resolved = import.meta.resolve(specifier);
+            if (!resolved.startsWith('file:')) throw new Error(`unresolved export: ${specifier}`);
+            console.log(specifier, resolved);
+          }
+          JS
+
+      - name: Run full repository preflight
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run preflight 2>&1 | tee /tmp/preflight.log
 
       - name: Final exact-source audit
         if: always()
