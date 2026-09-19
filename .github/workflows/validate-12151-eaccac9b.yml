@@ -83,8 +83,31 @@ jobs:
           fi
           rm -rf .integration-tests
 
-      - name: Full repository preflight
-        run: npm run preflight
+      - name: Preflight — clean
+        run: npm run clean
+
+      - name: Preflight — locked install
+        run: npm ci
+
+      - name: Preflight — format
+        run: |
+          npm run format
+          git diff --exit-code
+
+      - name: Preflight — lint
+        run: npm run lint:ci
+
+      - name: Preflight — build
+        run: npm run build
+
+      - name: Preflight — typecheck
+        run: npm run typecheck
+
+      - name: Preflight — tests
+        run: npm run test:ci
+
+      - name: Preflight — serve fast-path bundle
+        run: npm run check:serve-fast-path-bundle
 
       - name: Final exact-source audit
         if: always()
