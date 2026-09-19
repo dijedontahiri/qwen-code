@@ -1,0 +1,88 @@
+name: Diagnose exact test-ci failures
+
+on:
+  push:
+    branches: [validation/test-ci-failures-r1]
+    paths: [.github/workflows/diagnose-test-ci-failures.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  test-ci:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: issue-7002
+            source_sha: 78ba1c4b8d15fe52e0538334664de733c1f3a196
+          - label: issue-12151
+            source_sha: eaccac9bce597efa24dcc4fd56d108e5a1ff8456
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ matrix.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ matrix.source_sha }}"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build workspace
+        run: npm run build
+
+      - name: Run test-ci and preserve its real exit status
+        id: tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          set +e
+          npm run test:ci 2>&1 | tee test-ci.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "test-ci exit status: $status"
+
+      - name: Upload diagnostic test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: test-ci-${{ matrix.label }}-${{ matrix.source_sha }}
+          path: test-ci.log
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ matrix.source_sha }}"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Preserve test-ci outcome
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.tests.outputs.status }}" = 0
