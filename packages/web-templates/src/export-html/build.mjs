@@ -49,16 +49,17 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // compile before the transcript renders. The CSS is a separate, parallel,
 // year-cached asset and is logged rather than budgeted.
 //
-// Last measured at 1,833,894 bytes of JS with 2,302,905 bytes of CSS moved
-// out, by the Lint & Static lane on this branch. Before the split that lane
-// measured the combined bundle at 4,133,282 bytes on main at c3023b3e6d — the
-// measurement #11372 raised these two constants for, and which this branch
-// supersedes because the CSS it counted is no longer in the JS. Keep the
-// warning close to the measurement and the hard ceiling close above it: a cap
-// left far above the measurement is a ratchet with enough slack for a whole
-// dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 1_870_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;
+// Last measured at 1,806,361 bytes of JS after the document-only MCP bridge
+// substitution. A control build with that substitution disabled measured
+// 2,111,566 bytes and crosses the hard ceiling below. Before the stylesheet
+// split, the Lint & Static lane measured the combined bundle at 4,133,282 bytes
+// on main at c3023b3e6d — the measurement #11372 raised these constants for,
+// and which this branch supersedes because the CSS it counted is no longer in
+// the JS. Keep the warning close to the measurement and the hard ceiling close
+// above it: a cap left far above the measurement is a ratchet with enough slack
+// for a dependency family to come back unnoticed.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 1_830_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -158,10 +159,11 @@ const stripDocumentDeadModules = {
 // ~2.3 MB stylesheet. That duplicate would slip past both guards further down:
 // the document nonces every <style> created through document.createElement (the
 // shim in document-index.html), so the CSP admits the injected copy instead of
-// blocking it, and re-adding only the 367-byte injection line keeps the bundle
-// inside DOCUMENT_RUNTIME_WARNING_BYTES and MAX_DOCUMENT_RUNTIME_BYTES. So this
-// throw is the only guard on that path — and the createElement shim is what the
-// shipped renderer's own <style> injection still depends on.
+// blocking it. Re-adding only the 367-byte injection line would still sit below
+// the re-baselined warning threshold, so the size budgets cannot guard this
+// duplication path. This throw is the only guard on that path — and the
+// createElement shim is what the shipped renderer's own <style> injection still
+// depends on.
 const extractedTranscriptCss = { css: undefined };
 const extractTranscriptCss = {
   name: 'extract-transcript-css',
@@ -324,6 +326,19 @@ if (!extractedTranscriptCss.css) {
 // below says *how much*; this says *what of*, which is the question a
 // regression actually raises.
 const documentInputs = documentBuildResult.metafile.inputs;
+const hasDocumentMcpAppBridgeStub = Object.keys(documentInputs).some((input) => {
+  const normalizedInput = input.replaceAll('\\', '/');
+  return (
+    normalizedInput === 'document-mcp-app-bridge-stub.ts' ||
+    normalizedInput.endsWith('/document-mcp-app-bridge-stub.ts')
+  );
+});
+if (!hasDocumentMcpAppBridgeStub) {
+  throw new Error(
+    'Document MCP App bridge substitution did not engage; refusing to build ' +
+      'the static transcript without the document-only bridge boundary.',
+  );
+}
 const inputBytesByPackage = new Map();
 for (const [input, { bytes }] of Object.entries(documentInputs)) {
   const match = input.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//);
