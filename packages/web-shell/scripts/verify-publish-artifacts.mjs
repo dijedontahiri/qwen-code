@@ -64,7 +64,9 @@ function builtWildcardTargets(entry) {
   const pattern = exportPatternRegex(entry);
   return readdirSync(scanRoot, { recursive: true })
     .map((name) => join(scanRoot, name))
-    .filter((target) => statSync(target).isFile() && pattern.test(packPath(target)));
+    .filter(
+      (target) => statSync(target).isFile() && pattern.test(packPath(target)),
+    );
 }
 
 function validateRelativeImports(entry, target) {
@@ -92,7 +94,9 @@ for (const entry of new Set(entryPoints)) {
       const targetPath = packPath(target);
       const label = `${entry} matches ${targetPath}`;
       if (packed && !packed.has(targetPath)) {
-        problems.push(`${label}, which was built but is not included in the npm package`);
+        problems.push(
+          `${label}, which was built but is not included in the npm package`,
+        );
         continue;
       }
       validateRelativeImports(label, target);
