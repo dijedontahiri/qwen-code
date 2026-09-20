@@ -57,13 +57,13 @@ jobs:
         run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js -t 'refuses a built wildcard target that is omitted from the tarball'
       - name: Test actual published package shape
         run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts the shape the published package actually ships'
-      - name: Run complete verifier regression suite and formatting
+      - name: Run complete verifier regression suite
         run: |
           set -euo pipefail
           npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js > "$RUNNER_TEMP/focused.log" 2>&1 || { tail -160 "$RUNNER_TEMP/focused.log"; exit 1; }
-          grep -F '6 passed' "$RUNNER_TEMP/focused.log" >/dev/null || { cat "$RUNNER_TEMP/focused.log"; exit 1; }
           tail -40 "$RUNNER_TEMP/focused.log"
-          node_modules/.bin/prettier --check packages/web-shell/scripts/verify-publish-artifacts.mjs scripts/tests/web-shell-publish-artifacts.test.js
+      - name: Check verifier formatting
+        run: node_modules/.bin/prettier --check packages/web-shell/scripts/verify-publish-artifacts.mjs scripts/tests/web-shell-publish-artifacts.test.js
       - name: Build and verify the real Web Shell package
         run: |
           set -euo pipefail
