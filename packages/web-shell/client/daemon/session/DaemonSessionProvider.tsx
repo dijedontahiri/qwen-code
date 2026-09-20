@@ -205,8 +205,8 @@ interface LiveJournalRepairEpisode {
   snapshotLastEventId: number;
   lastObservedEventId: number;
   terminalSeen: boolean;
-  attempted: boolean;
   withheldSettlement?: DaemonPromptSettledEvent;
+  attempted: boolean;
   controller?: AbortController;
 }
 
@@ -2962,6 +2962,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       };
               } else if (repairingEpisode) {
                 liveJournalRepairRef.current = undefined;
+                if (repairingEpisode.withheldSettlement) {
+                  publishPromptSettlement(repairingEpisode.withheldSettlement);
+                }
               }
             } else if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
@@ -3059,9 +3062,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ) {
                 publishPromptSettlement(replaySettlement);
               }
-            }
-            if (repairingEpisode?.withheldSettlement) {
-              publishPromptSettlement(repairingEpisode.withheldSettlement);
             }
             if (sessionRef.current === activeSession) {
               for (const event of notificationReplayEvents) {
@@ -3946,10 +3946,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   activeSession.sessionId,
                   event,
                 );
-                if (settlement && repairTargetsTerminal && pendingRepair) {
-                  pendingRepair.withheldSettlement = settlement;
-                } else if (settlement && !repairTargetsTerminal) {
-                  publishPromptSettlement(settlement);
+                if (settlement) {
+                  if (repairTargetsTerminal && pendingRepair) {
+                    pendingRepair.withheldSettlement = settlement;
+                  } else {
+                    publishPromptSettlement(settlement);
+                  }
                 }
               }
               if (repairTargetsTerminal && pendingRepair) {

@@ -11813,6 +11813,7 @@ describe('DaemonSessionProvider', () => {
     // the repair resolves. Dropping `!repairTargetsTerminal` from the publish
     // condition turns this red.
     const terminalGate = createDeferred<void>();
+    const repairGate = createDeferred<void>();
     const initialSession = createMockSession({
       sessionId: 'session-settle-repair',
       hasActivePrompt: true,
@@ -11917,7 +11918,16 @@ describe('DaemonSessionProvider', () => {
         liveJournal: [],
       },
     });
-    sdkMocks.sessions.push(initialSession, repairedSession);
+    sdkMocks.MockDaemonSessionClient.load
+      .mockImplementationOnce(async (client: unknown) => {
+        initialSession.client = client as MockClient;
+        return initialSession;
+      })
+      .mockImplementationOnce(async (client: unknown) => {
+        await repairGate.promise;
+        repairedSession.client = client as MockClient;
+        return repairedSession;
+      });
     const settlements: DaemonPromptSettledEvent[] = [];
 
     function Harness() {
@@ -11935,14 +11945,20 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(settlements).toEqual([]);
-    // Positive control: the episode really was armed for this prompt, and the
-    // terminal really did trigger the repair reload rather than being ignored.
+    // Positive control: the episode really was armed for this prompt and the
+    // terminal started the repair, while publication is still withheld until
+    // the repaired projection is available.
+    await vi.waitFor(() =>
+      expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
+    );
+    expect(settlements).toEqual([]);
+
     await act(async () => {
-      await vi.waitFor(() =>
-        expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
-      );
+      repairGate.resolve();
       await flushPromises();
+      await flushTranscriptDispatch();
     });
+
     // The repair reapplies the complete transcript before releasing the exact
     // settlement withheld from the live path. A never-admitted prompt does not
     // need to pass the ordinary replay admission gate to receive that settlement.
