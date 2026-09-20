@@ -1,0 +1,82 @@
+name: Validate 12310 packed publish guard
+
+on:
+  push:
+    branches:
+      - validation/12310-packed-publish-guard
+
+permissions:
+  contents: read
+
+jobs:
+  linux-full:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b337ed1c00afd830ecc2c94d9e7d4ced81aef9a0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - name: Environment preflight
+        run: |
+          node --version
+          npm --version
+          corepack pnpm --version
+          df -h .
+      - name: Install locked dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: Focused packed-artifact regressions
+        run: corepack pnpm exec vitest run --config scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js --retry=0
+      - name: Build and verify Web Shell package
+        run: |
+          npm run build --workspace=packages/web-shell
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+          (cd packages/web-shell && npm pack --dry-run --json --ignore-scripts > /tmp/web-shell-pack.json)
+          node -e "const p=require('/tmp/web-shell-pack.json'); if(!Array.isArray(p)||p.length!==1||!p[0].files?.length) process.exit(1)"
+      - name: Repository preflight
+        run: npm run preflight
+      - name: Confirm immutable clean source
+        run: |
+          test "$(git rev-parse HEAD)" = "b337ed1c00afd830ecc2c94d9e7d4ced81aef9a0"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+
+  windows-focused:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b337ed1c00afd830ecc2c94d9e7d4ced81aef9a0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - name: Environment preflight
+        run: |
+          node --version
+          npm --version
+          corepack pnpm --version
+      - name: Install locked dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: Focused packed-artifact regressions
+        run: corepack pnpm exec vitest run --config scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js --retry=0
+      - name: Build and verify Web Shell package
+        run: |
+          npm run build --workspace=packages/web-shell
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+      - name: Confirm immutable source
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne "b337ed1c00afd830ecc2c94d9e7d4ced81aef9a0") { exit 1 }
+          git diff --exit-code
+          git diff --cached --exit-code
+          if ((git ls-files --others --exclude-standard)) { exit 1 }
