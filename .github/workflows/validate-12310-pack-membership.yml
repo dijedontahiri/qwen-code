@@ -14,13 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      CANDIDATE_SHA: 66528967cc194dacbab93105b3ca7c15d7ab6115
+      CANDIDATE_SHA: dd82e65563d29729b2d901d9f16bb34f75177960
       BASE_SHA: b3dee94b64a0aa89cba5a232cd88b5d493856f78
     steps:
       - name: Checkout immutable candidate
         uses: actions/checkout@v4
         with:
-          ref: 66528967cc194dacbab93105b3ca7c15d7ab6115
+          ref: dd82e65563d29729b2d901d9f16bb34f75177960
           fetch-depth: 2
 
       - name: Verify source and environment
