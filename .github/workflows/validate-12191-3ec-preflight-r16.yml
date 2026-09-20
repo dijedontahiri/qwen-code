@@ -1,0 +1,64 @@
+name: Validate PR 12191 exact literal preflight r16
+
+on:
+  push:
+    branches: [validation/12191-3ec-literal-preflight-r16]
+    paths: [.github/workflows/validate-12191-3ec-preflight-r16.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SOURCE_SHA: 3ec369460d5e667289e297961457dd259dba42a7
+      PARENT_SHA: 9efce16d482095b24d155513c0e6e513a12bfbdb
+    steps:
+      - name: Checkout immutable product source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 30
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source and review-fix scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          df -h .
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git merge-base "$PARENT_SHA" "$SOURCE_SHA")" = "$PARENT_SHA"
+          git diff --check "$PARENT_SHA" "$SOURCE_SHA"
+          actual=$(git diff --name-only "$PARENT_SHA" "$SOURCE_SHA" | sort)
+          expected=$(printf '%s\n' \
+            packages/web-templates/src/export-html/build.mjs \
+            packages/web-templates/src/export-html/document-mcp-stub-guard.mjs \
+            scripts/tests/document-mcp-stub-guard.test.js | sort)
+          test "$actual" = "$expected"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Run literal repository preflight
+        run: npm run preflight
+
+      - name: Final immutable-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --check "$PARENT_SHA" "$SOURCE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
