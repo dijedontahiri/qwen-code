@@ -1,0 +1,65 @@
+name: Build issue 12230 candidate
+
+on:
+  push:
+    branches:
+      - automation/12230-builder-20260921
+
+permissions:
+  contents: write
+
+jobs:
+  build-candidate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+      - name: Build exact product commit
+        env:
+          BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+          PRODUCT_BRANCH: fix/12230-live-journal-settlement
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch https://github.com/QwenLM/qwen-code.git "$BASE_SHA"
+          git checkout --detach "$BASE_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx')
+          text = source.read_text()
+
+          old = '''  terminalSeen: boolean;\n  attempted: boolean;\n  controller?: AbortController;\n}'''
+          new = '''  terminalSeen: boolean;\n  attempted: boolean;\n  withheldSettlement?: DaemonPromptSettledEvent;\n  controller?: AbortController;\n}'''
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+
+          old = '''                if (settlement && !repairTargetsTerminal) {\n                  publishPromptSettlement(settlement);\n                }'''
+          new = '''                if (settlement && repairTargetsTerminal && pendingRepair) {\n                  pendingRepair.withheldSettlement = settlement;\n                } else if (settlement && !repairTargetsTerminal) {\n                  publishPromptSettlement(settlement);\n                }'''
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+
+          old = '''              if (\n                replaySettlement &&\n                locallyBoundPromptIdsRef.current\n                  .get(replaySettlement.sessionId)\n                  ?.has(replaySettlement.promptId)\n              ) {\n                publishPromptSettlement(replaySettlement);\n              }\n            }\n            if (sessionRef.current === activeSession) {'''
+          new = '''              if (\n                replaySettlement &&\n                locallyBoundPromptIdsRef.current\n                  .get(replaySettlement.sessionId)\n                  ?.has(replaySettlement.promptId)\n              ) {\n                publishPromptSettlement(replaySettlement);\n              }\n            }\n            if (repairingEpisode?.withheldSettlement) {\n              publishPromptSettlement(repairingEpisode.withheldSettlement);\n            }\n            if (sessionRef.current === activeSession) {'''
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          source.write_text(text)
+
+          test = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          text = test.read_text()
+          old = '''    // Current behavior, not desired, pinned deliberately: the replay publish is\n    // gated on local admission and this prompt was never admitted, so the\n    // settlement the live path withheld is never re-published (#12230).\n    expect(settlements).toEqual([]);'''
+          new = '''    // The repair reapplies the complete transcript before releasing the exact\n    // settlement withheld from the live path. A never-admitted prompt does not\n    // need to pass the ordinary replay admission gate to receive that settlement.\n    expect(settlements).toEqual([\n      {\n        sessionId: 'session-settle-repair',\n        promptId: 'prompt-live',\n        outcome: 'completed',\n        stopReason: 'end_turn',\n      },\n    ]);'''
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          test.write_text(text)
+          PY
+          git diff --check
+          test "$(git diff --name-only | wc -l)" -eq 2
+          git config user.name "OpenAI automation"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+          git commit -m "fix(web-shell): publish settlement after journal repair"
+          git push origin HEAD:"$PRODUCT_BRANCH"
