@@ -1,0 +1,249 @@
+name: Prepare issue 11997 composer tag padding r1
+
+on:
+  push:
+    branches: [work/11997-composer-tag-padding-r1]
+    paths: [.github/workflows/prepare-11997-composer-tag-padding-r1.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-test-push:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CI: 'true'
+      BASE_SHA: fda4abad194882b8176a0bdba5fa77b6d275b07f
+      PRODUCT_BRANCH: fix/11997-composer-tag-padding
+    steps:
+      - name: Check out immutable upstream base
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 20
+          persist-credentials: true
+
+      - name: Set up Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify base and reserved branch ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          git fetch --no-tags origin "$PRODUCT_BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Install locked dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          node node_modules/playwright/cli.js install --with-deps chromium
+          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+          if [ -f "$nested_cli" ]; then
+            node "$nested_cli" install chromium
+          fi
+
+      - name: Add real-browser regression test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > packages/web-shell/client/e2e/composer-tag-spacing.spec.ts <<'TS'
+          import { expect, test } from '@playwright/test';
+          import { fileURLToPath } from 'node:url';
+
+          const composerCss = fileURLToPath(
+            new URL('../components/ChatEditor.module.css', import.meta.url),
+          );
+          const messageCss = fileURLToPath(
+            new URL('../components/messages/UserMessage.module.css', import.meta.url),
+          );
+
+          test('@smoke keeps non-removable composer tags padded on the right', async ({
+            page,
+          }) => {
+            await page.setContent(`
+              <span class="tag" data-case="composer-static">
+                <span class="tagContent"><span class="tagLabel">Task</span></span>
+              </span>
+              <span class="tag" data-case="composer-removable">
+                <span class="tagContent"><span class="tagLabel">Task</span></span>
+                <button class="tagRemove" type="button">×</button>
+              </span>
+              <span class="messageTag" data-case="message-static">
+                <span class="messageTagLabel">Task</span>
+                <span class="messageTagTooltip">details</span>
+              </span>
+              <span class="messageTag" data-case="message-valued">
+                <span class="messageTagLabel">Task</span>
+                <span class="messageTagValue">/task</span>
+                <span class="messageTagTooltip">details</span>
+              </span>
+            `);
+            await page.addStyleTag({ path: composerCss });
+            await page.addStyleTag({ path: messageCss });
+
+            const paddings = await page.evaluate(() => {
+              const paddingRight = (selector: string) =>
+                getComputedStyle(document.querySelector<HTMLElement>(selector)!).paddingRight;
+              return {
+                composerStatic: paddingRight(
+                  '[data-case="composer-static"] .tagLabel',
+                ),
+                composerRemovable: paddingRight(
+                  '[data-case="composer-removable"] .tagLabel',
+                ),
+                messageStatic: paddingRight(
+                  '[data-case="message-static"] .messageTagLabel',
+                ),
+                messageValuedLabel: paddingRight(
+                  '[data-case="message-valued"] .messageTagLabel',
+                ),
+                messageValuedValue: paddingRight(
+                  '[data-case="message-valued"] .messageTagValue',
+                ),
+              };
+            });
+
+            console.log(
+              `TAG_PADDING composer=${paddings.composerStatic} user=${paddings.messageStatic}`,
+            );
+            expect(paddings.composerStatic).toBe('7px');
+            expect(paddings.composerRemovable).toBe('0px');
+            expect(paddings.messageStatic).toBe('7px');
+            expect(paddings.messageValuedLabel).toBe('0px');
+            expect(paddings.messageValuedValue).toBe('7px');
+          });
+          TS
+
+      - name: Prove baseline browser assertion failure is the missing padding
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          npm run test:e2e:smoke --workspace=@qwen-code/web-shell -- \
+            client/e2e/composer-tag-spacing.spec.ts --project=chromium --retries=0 \
+            2>&1 | tee "$RUNNER_TEMP/baseline-browser.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          test "$rc" -ne 0
+          grep -q 'TAG_PADDING composer=0px user=0px' "$RUNNER_TEMP/baseline-browser.log"
+          echo 'BASELINE_PADDING_FAILURE_CONFIRMED=1'
+
+      - name: Apply minimal CSS correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          composer = Path('packages/web-shell/client/components/ChatEditor.module.css')
+          source = composer.read_text()
+          needle = """.tagValue {
+            max-width: 32ch;
+            padding: 3px 0 3px 0.5ch;
+            color: var(--foreground, #e4e4e4);
+            opacity: 1;
+          }
+          """
+          replacement = needle + """
+          .tagContent:last-child > .tagLabel:last-child,
+          .tagContent:last-child > .tagValue:last-child {
+            padding-right: 7px;
+          }
+          """
+          if source.count(needle) != 1:
+            raise SystemExit('composer CSS anchor drifted')
+          composer.write_text(source.replace(needle, replacement))
+
+          message = Path('packages/web-shell/client/components/messages/UserMessage.module.css')
+          source = message.read_text()
+          needle = """.messageTagValue {
+            max-width: 32ch;
+            padding: 3px 0 3px 0.5ch;
+            color: var(--foreground, #e4e4e4);
+            opacity: 1;
+          }
+          """
+          replacement = needle + """
+          .messageTagLabel:not(:has(+ .messageTagValue)),
+          .messageTagValue {
+            padding-right: 7px;
+          }
+          """
+          if source.count(needle) != 1:
+            raise SystemExit('user-message CSS anchor drifted')
+          message.write_text(source.replace(needle, replacement))
+          PY
+          git diff --check
+          actual=$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort -u )
+          expected=$(printf '%s\n' \
+            packages/web-shell/client/components/ChatEditor.module.css \
+            packages/web-shell/client/components/messages/UserMessage.module.css \
+            packages/web-shell/client/e2e/composer-tag-spacing.spec.ts | sort)
+          test "$actual" = "$expected"
+
+      - name: Run fixed browser regression in Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run test:e2e:smoke --workspace=@qwen-code/web-shell -- \
+            client/e2e/composer-tag-spacing.spec.ts --project=chromium --retries=0 \
+            2>&1 | tee "$RUNNER_TEMP/final-browser.log"
+          grep -q 'TAG_PADDING composer=7px user=7px' "$RUNNER_TEMP/final-browser.log"
+
+      - name: Run affected quality checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell
+          node_modules/.bin/prettier --experimental-cli --check \
+            packages/web-shell/client/components/ChatEditor.module.css \
+            packages/web-shell/client/components/messages/UserMessage.module.css \
+            packages/web-shell/client/e2e/composer-tag-spacing.spec.ts
+          git diff --check
+
+      - name: Run literal repository preflight
+        run: npm run preflight
+
+      - name: Commit and fast-forward product branch only after verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          actual=$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort -u )
+          expected=$(printf '%s\n' \
+            packages/web-shell/client/components/ChatEditor.module.css \
+            packages/web-shell/client/components/messages/UserMessage.module.css \
+            packages/web-shell/client/e2e/composer-tag-spacing.spec.ts | sort)
+          test "$actual" = "$expected"
+
+          git fetch --no-tags origin "$PRODUCT_BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE_SHA"
+
+          git config user.name 'Dijedon'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          git add \
+            packages/web-shell/client/components/ChatEditor.module.css \
+            packages/web-shell/client/components/messages/UserMessage.module.css \
+            packages/web-shell/client/e2e/composer-tag-spacing.spec.ts
+          git commit -m 'fix(web-shell): pad non-removable composer tags'
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          git push origin HEAD:"refs/heads/$PRODUCT_BRANCH"
+          echo "PRODUCT_SHA=$(git rev-parse HEAD)"
