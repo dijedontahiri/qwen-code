@@ -16,6 +16,7 @@ jobs:
     env:
       BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
       TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
+      NO_COLOR: '1'
     steps:
       - name: Checkout immutable upstream base
         uses: actions/checkout@v4
