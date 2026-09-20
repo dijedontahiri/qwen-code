@@ -1,0 +1,103 @@
+name: Validate #12310 pack membership
+
+on:
+  push:
+    branches:
+      - validation/12310-66528967
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CANDIDATE_SHA: 66528967cc194dacbab93105b3ca7c15d7ab6115
+      BASE_SHA: b3dee94b64a0aa89cba5a232cd88b5d493856f78
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@v4
+        with:
+          ref: 66528967cc194dacbab93105b3ca7c15d7ab6115
+          fetch-depth: 2
+
+      - name: Verify source and environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          node --version
+          cat .nvmrc
+          df -h .
+          node -e "const p=require('./package.json'); console.log(p.packageManager)"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+
+      - name: Prove baseline verifier misses packed-file failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout "$BASE_SHA" -- packages/web-shell/scripts/verify-publish-artifacts.mjs
+          if npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-verifier.test.js 2>&1 | tee /tmp/baseline.log; then
+            echo 'baseline verifier unexpectedly passed the candidate regression tests' >&2
+            exit 1
+          fi
+          grep -F 'rejects an export that exists on disk but is omitted from npm pack' /tmp/baseline.log
+          grep -F 'rejects a relative chunk that exists on disk but is omitted from npm pack' /tmp/baseline.log
+          git checkout "$CANDIDATE_SHA" -- packages/web-shell/scripts/verify-publish-artifacts.mjs
+          git diff --exit-code
+          git diff --cached --exit-code
+
+      - name: Run focused verifier regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-verifier.test.js
+
+      - name: Build Web Shell and verify real package
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build --workspace=@qwen-code/web-shell
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+          (cd packages/web-shell && npm pack --dry-run --json --ignore-scripts > /tmp/web-shell-pack.json)
+          node -e "const p=require('/tmp/web-shell-pack.json'); if (!Array.isArray(p[0]?.files) || p[0].files.length === 0) process.exit(1); console.log('packed files:', p[0].files.length)"
+
+      - name: Check changed-file formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx prettier --experimental-cli --check packages/web-shell/scripts/verify-publish-artifacts.mjs scripts/tests/web-shell-publish-verifier.test.js
+
+      - name: Run repository preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run preflight
+
+      - name: Audit exact final source
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          untracked="$(git ls-files --others --exclude-standard)"
+          if [ -n "$untracked" ]; then
+            printf '%s\n' "$untracked" >&2
+            exit 1
+          fi
