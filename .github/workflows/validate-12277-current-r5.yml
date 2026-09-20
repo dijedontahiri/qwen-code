@@ -1,9 +1,9 @@
-name: Validate issue 12277 current main
+name: Diagnose issue 12277 preflight stage
 
 on:
   push:
     branches:
-      - validation/12277-current-r5
+      - validation/12277-current-r6
     paths:
       - .github/workflows/validate-12277-current-r5.yml
 
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  diagnose:
     if: github.repository == 'dijedontahiri/qwen-code'
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -86,8 +86,37 @@ jobs:
             packages/cli/src/serve/local-control/service.ts \
             packages/cli/src/serve/local-control/service.test.ts
 
-      - name: Run literal repository preflight
-        run: npm run preflight
+      - name: Preflight clean
+        run: npm run clean
+
+      - name: Preflight locked install
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Preflight format
+        run: npm run format
+
+      - name: Assert formatter did not change source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Preflight lint
+        run: npm run lint:ci
+
+      - name: Preflight build
+        run: npm run build
+
+      - name: Preflight typecheck
+        run: npm run typecheck
+
+      - name: Preflight tests
+        run: npm run test:ci
+
+      - name: Preflight serve fast-path check
+        run: npm run check:serve-fast-path-bundle
 
       - name: Final immutable-source audit
         if: always()
