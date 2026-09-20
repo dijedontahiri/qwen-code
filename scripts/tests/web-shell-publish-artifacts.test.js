@@ -9,7 +9,6 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -21,6 +20,7 @@ const verifierPath = join(
   repoRoot,
   'packages/web-shell/scripts/verify-publish-artifacts.mjs',
 );
+const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function makeFixture() {
   const root = mkdtempSync(join(tmpdir(), 'qwen-web-shell-pack-'));
@@ -55,7 +55,7 @@ describe('web-shell publish artifact verifier', () => {
     try {
       const packed = JSON.parse(
         execFileSync(
-          'npm',
+          npmCommand,
           ['pack', '--dry-run', '--json', '--ignore-scripts'],
           { cwd: root, encoding: 'utf8' },
         ),
