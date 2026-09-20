@@ -206,6 +206,7 @@ interface LiveJournalRepairEpisode {
   lastObservedEventId: number;
   terminalSeen: boolean;
   attempted: boolean;
+  withheldSettlement?: DaemonPromptSettledEvent;
   controller?: AbortController;
 }
 
@@ -3059,6 +3060,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 publishPromptSettlement(replaySettlement);
               }
             }
+            if (repairingEpisode?.withheldSettlement) {
+              publishPromptSettlement(repairingEpisode.withheldSettlement);
+            }
             if (sessionRef.current === activeSession) {
               for (const event of notificationReplayEvents) {
                 turnNotifications.observe(activeSession, event, true, () =>
@@ -3942,7 +3946,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   activeSession.sessionId,
                   event,
                 );
-                if (settlement && !repairTargetsTerminal) {
+                if (settlement && repairTargetsTerminal && pendingRepair) {
+                  pendingRepair.withheldSettlement = settlement;
+                } else if (settlement && !repairTargetsTerminal) {
                   publishPromptSettlement(settlement);
                 }
               }

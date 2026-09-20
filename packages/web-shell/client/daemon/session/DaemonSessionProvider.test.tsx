@@ -11943,10 +11943,17 @@ describe('DaemonSessionProvider', () => {
       );
       await flushPromises();
     });
-    // Current behavior, not desired, pinned deliberately: the replay publish is
-    // gated on local admission and this prompt was never admitted, so the
-    // settlement the live path withheld is never re-published (#12230).
-    expect(settlements).toEqual([]);
+    // The repair reapplies the complete transcript before releasing the exact
+    // settlement withheld from the live path. A never-admitted prompt does not
+    // need to pass the ordinary replay admission gate to receive that settlement.
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-repair',
+        promptId: 'prompt-live',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
   });
 
   it('does not let replay state events overwrite fresh connection status', async () => {
