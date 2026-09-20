@@ -10,6 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MutableOriginAllowlist } from '../auth.js';
 import { CredentialStore } from './credentials.js';
+import { listenerIdentityOfSocket } from './listener-identity.js';
 import { LocalControlService } from './service.js';
 
 const sleep = vi.hoisted(() => ({ release: vi.fn() }));
@@ -171,45 +172,75 @@ describe('LocalControlService', () => {
     await service.disable();
   });
 
-  it('detaches the temporary listening handler when listen fails', async () => {
-    // Occupy the port so `listen()` rejects with EADDRINUSE. The pending
-    // `once('listening')` handler must be removed on the error path; if it
-    // lingered, a retry on the same server could resolve via the stale handler.
+  it('falls back to a free LAN port when the preferred port is in use', async () => {
+    // Occupy the preferred LAN endpoint. Local Control must not fail just
+    // because the primary daemon's ephemeral port is already held on this
+    // interface by an unrelated socket.
     const blocker = createServer();
     await new Promise<void>((resolve) =>
       blocker.listen(0, '127.0.0.1', resolve),
     );
     const busyPort = (blocker.address() as AddressInfo).port;
 
+    const credentials = new CredentialStore();
+    const origins = new MutableOriginAllowlist({
+      allowAny: false,
+      origins: new Set(),
+    });
     const attached: Server[] = [];
+    const detached: Server[] = [];
+    let baselineListeningListeners: number | undefined;
     const service = new LocalControlService({
       app: express(),
-      credentials: new CredentialStore(),
-      originAllowlist: new MutableOriginAllowlist({
-        allowAny: false,
-        origins: new Set(),
-      }),
-      attachWebSocket: (server) => attached.push(server),
-      detachWebSocket: vi.fn(),
+      credentials,
+      originAllowlist: origins,
+      attachWebSocket: (server) => {
+        attached.push(server);
+        baselineListeningListeners = server.listenerCount('listening');
+      },
+      detachWebSocket: (server) => detached.push(server),
       getPort: () => busyPort,
     });
 
-    await expect(service.enable()).rejects.toThrow();
+    try {
+      const status = await service.enable();
+      expect(status.active).toBe(true);
+      expect(status.port).toBeTypeOf('number');
+      expect(status.port).not.toBe(busyPort);
+      expect(status.port).toBeGreaterThan(0);
+      expect(attached).toHaveLength(1);
+      // Node's HTTP server owns an internal `listening` handler before Local
+      // Control attaches. Assert that both temporary handlers used by our two
+      // bind attempts are gone rather than assuming the server starts at zero.
+      expect(attached[0].listenerCount('listening')).toBe(
+        baselineListeningListeners,
+      );
+      expect(attached[0].listenerCount('error')).toBe(1);
+
+      const url = new URL(status.url!);
+      expect(Number(url.port)).toBe(status.port);
+      expect(origins.allows(`http://127.0.0.1:${busyPort}`)).toBe(false);
+      expect(origins.allows(url.origin)).toBe(true);
+
+      const token = url.hash.slice('#token='.length);
+      expect(
+        credentials.verify(token, {
+          kind: 'local-control',
+          authority: `127.0.0.1:${status.port}`,
+        }),
+      ).toBe(true);
+
+      const listener = listenerIdentityOfSocket({
+        server: attached[0],
+      } as unknown as Parameters<typeof listenerIdentityOfSocket>[0]);
+      expect(listener.authority).toBe(`127.0.0.1:${status.port}`);
+      expect(listener.origin).toBe(url.origin);
+    } finally {
+      await service.disable();
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+
+    expect(detached).toEqual(attached);
     expect(service.active).toBe(false);
-    expect(attached).toHaveLength(1);
-
-    // Node attaches its own internal 'listening' listener during listen(), so
-    // compare against a control server that failed the same way without any of
-    // the service's handlers: a leftover temporary handler would show up as +1.
-    const control = createServer();
-    await new Promise<void>((resolve) => {
-      control.once('error', () => resolve());
-      control.listen(busyPort, '127.0.0.1');
-    });
-    expect(attached[0].listenerCount('listening')).toBe(
-      control.listenerCount('listening'),
-    );
-
-    await new Promise<void>((resolve) => blocker.close(() => resolve()));
   });
 });

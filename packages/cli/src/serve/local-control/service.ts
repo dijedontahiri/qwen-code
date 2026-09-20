@@ -122,6 +122,7 @@ export class LocalControlService {
   #server: Server | undefined;
   #token: PairingToken | undefined;
   #selected: LanCandidate | undefined;
+  #port: number | undefined;
   #sleep: SleepInhibitorHandle | undefined;
   #url: string | undefined;
   #transition: Promise<void> = Promise.resolve();
@@ -135,7 +136,12 @@ export class LocalControlService {
   }
 
   status(): LocalControlStatus {
-    if (!this.#server || !this.#token || !this.#selected) {
+    if (
+      !this.#server ||
+      !this.#token ||
+      !this.#selected ||
+      this.#port === undefined
+    ) {
       return { active: false };
     }
     return {
@@ -143,7 +149,7 @@ export class LocalControlService {
       url: this.#url,
       interfaceName: this.#selected.interfaceName,
       address: this.#selected.address,
-      port: this.#deps.getPort(),
+      port: this.#port,
       sleepInhibited: this.#sleep !== undefined && sleepInhibitor.isRunning(),
       encrypted: this.#deps.tlsPaths !== undefined,
     };
@@ -167,14 +173,20 @@ export class LocalControlService {
     if (this.active) return this.status();
 
     const selected = selectLanAddress(options.address);
-    const port = this.#deps.getPort();
-    const authority = `${selected.address}:${port}`;
+    const preferredPort = this.#deps.getPort();
     const token = mintPairingToken();
 
     const tls = this.#deps.tlsPaths;
     const scheme = tls ? 'https' : 'http';
-    const origin = new URL(`${scheme}://${authority}`).origin;
-    const url = buildPairedUrl(scheme, authority, token.secret, options.target);
+    // Validate the target before committing any credential, CORS, or listener
+    // state. The authority is replaced with the actual bound port below when
+    // an EADDRINUSE fallback is needed.
+    buildPairedUrl(
+      scheme,
+      `${selected.address}:${preferredPort}`,
+      token.secret,
+      options.target,
+    );
     const server = tls
       ? createSecureServer(
           { cert: readFileSync(tls.cert), key: readFileSync(tls.key) },
@@ -194,25 +206,89 @@ export class LocalControlService {
     // upload routes included).
     server.requestTimeout = REQUEST_TIMEOUT_MS;
     server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
-    // Tag before listening. Identity must be resolvable by the first request,
-    // and a request can arrive between `listen()` resolving and the next line
-    // of this function running.
-    tagListener(server, { kind: 'local-control', authority, origin });
 
-    // Register the credential and the origin BEFORE the socket accepts
-    // anything. Reversed, there is a window where the LAN listener is up but
-    // the pairing token is not yet valid — the phone's first request 401s and
-    // the user re-scans a QR that was never broken.
+    const currentlyBoundPort = () => {
+      const address = server.address();
+      return address && typeof address !== 'string'
+        ? address.port
+        : preferredPort;
+    };
+    const currentAuthority = () =>
+      `${selected.address}:${currentlyBoundPort()}`;
+
+    // Install the listener identity before either bind attempt. Its endpoint
+    // properties are accessors over server.address(), so as soon as a fallback
+    // socket is bound they expose the final OS-selected port even before our
+    // `listening` callback runs. An early request therefore cannot be
+    // misclassified with the rejected preferred authority.
+    tagListener(server, {
+      kind: 'local-control',
+      get authority() {
+        return currentAuthority();
+      },
+      get origin() {
+        return new URL(`${scheme}://${currentAuthority()}`).origin;
+      },
+    });
+
+    let boundPort = preferredPort;
+    let registeredOrigin: string | undefined;
+    let url: string | undefined;
+    const configureBoundEndpoint = (port: number) => {
+      const authority = `${selected.address}:${port}`;
+      const origin = new URL(`${scheme}://${authority}`).origin;
+      const nextUrl = buildPairedUrl(
+        scheme,
+        authority,
+        token.secret,
+        options.target,
+      );
+
+      if (registeredOrigin !== origin) {
+        if (registeredOrigin) {
+          this.#deps.originAllowlist.remove(CORS_KEY);
+        }
+        this.#deps.originAllowlist.add(CORS_KEY, origin);
+        registeredOrigin = origin;
+      }
+      boundPort = port;
+      url = nextUrl;
+    };
+
+    // Register the preferred endpoint BEFORE the socket accepts anything.
+    // Reversed, there is a window where the LAN listener is up but the pairing
+    // token/CORS origin are not yet valid — the phone's first request 401/403s
+    // and the user re-scans a QR that was never broken.
+    configureBoundEndpoint(preferredPort);
     this.#deps.credentials.addPairingToken(token.id, token.secret);
-    this.#deps.originAllowlist.add(CORS_KEY, origin);
 
     try {
       this.#deps.attachWebSocket(server);
-      await listen(server, port, selected.address);
+      try {
+        await listen(
+          server,
+          preferredPort,
+          selected.address,
+          configureBoundEndpoint,
+        );
+      } catch (error) {
+        if (!isAddressInUseError(error) || preferredPort === 0) throw error;
+
+        // The rejected preferred origin is no longer an active endpoint. Drop
+        // it before asking the OS for a free port; the actual origin is added
+        // synchronously from the fallback listener's `listening` callback.
+        this.#deps.originAllowlist.remove(CORS_KEY);
+        registeredOrigin = undefined;
+
+        // A primary daemon started with --port 0 may receive an ephemeral port
+        // that is already in use on the LAN interface by an unrelated socket.
+        // Reuse the same server and let the OS select a free LAN port instead.
+        await listen(server, 0, selected.address, configureBoundEndpoint);
+      }
     } catch (error) {
       this.#deps.detachWebSocket(server);
       this.#deps.credentials.revokePairingToken(token.id);
-      this.#deps.originAllowlist.remove(CORS_KEY);
+      if (registeredOrigin) this.#deps.originAllowlist.remove(CORS_KEY);
       throw error;
     }
 
@@ -224,6 +300,7 @@ export class LocalControlService {
     this.#server = server;
     this.#token = token;
     this.#selected = selected;
+    this.#port = boundPort;
     this.#url = url;
     // Best-effort, and reported as such: the core inhibitor no-ops on headless
     // SSH sessions and on hosts without a usable backend. A phone losing its
@@ -251,6 +328,7 @@ export class LocalControlService {
     this.#server = undefined;
     this.#token = undefined;
     this.#selected = undefined;
+    this.#port = undefined;
     this.#url = undefined;
 
     if (token) this.#deps.credentials.revokePairingToken(token.id);
@@ -317,7 +395,20 @@ function buildPairedUrl(
   return url.toString();
 }
 
-function listen(server: Server, port: number, host: string): Promise<void> {
+function isAddressInUseError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    (error as NodeJS.ErrnoException).code === 'EADDRINUSE'
+  );
+}
+
+function listen(
+  server: Server,
+  port: number,
+  host: string,
+  configureBoundEndpoint?: (port: number) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const onError = (error: Error) => {
       server.removeListener('listening', onListening);
@@ -325,6 +416,19 @@ function listen(server: Server, port: number, host: string): Promise<void> {
     };
     const onListening = () => {
       server.removeListener('error', onError);
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        void close(server).then(() =>
+          reject(new Error('Local Control listener has no TCP address.')),
+        );
+        return;
+      }
+      try {
+        configureBoundEndpoint?.(address.port);
+      } catch (error) {
+        void close(server).then(() => reject(error));
+        return;
+      }
       resolve();
     };
     server.once('error', onError);
