@@ -1,13 +1,10 @@
 name: Validate issue 12230 live-journal settlement repair
-
 on:
   push:
     branches: [validation/12230-live-journal-settlement]
     paths: [.github/workflows/maintenance-12230-live-journal-settlement.yml]
-
 permissions:
   contents: read
-
 jobs:
   validate:
     if: github.repository == 'dijedontahiri/qwen-code'
@@ -18,172 +15,82 @@ jobs:
       TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
       NO_COLOR: '1'
     steps:
-      - name: Checkout immutable upstream base
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: QwenLM/qwen-code
           ref: eceaede18ea5c37404b79974c6d4833c12c23935
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Verify environment and source identity
-        shell: bash
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify immutable base and install prerequisites
+        env:
+          QWEN_SKIP_PREPARE: '1'
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test -z "$(git status --short)"
-          node --version || true
-          df -h . "$RUNNER_TEMP"
-
-      - name: Setup Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
-        with:
-          node-version: 22.16.0
-
-      - name: Install locked dependencies
-        env:
-          QWEN_SKIP_PREPARE: '1'
-        shell: bash
-        run: |
-          set -euo pipefail
-          corepack enable
+          node --version
           corepack pnpm --version
+          df -h . "$RUNNER_TEMP"
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -100 "$RUNNER_TEMP/install.log"; exit 1; }
           npm run build
           git restore --source=HEAD --staged --worktree .
           test -z "$(git status --short)"
-
       - name: Prove baseline regression assertion fails
-        shell: bash
         run: |
           set -euo pipefail
-          python3 <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
-          path = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
-          text = path.read_text()
-          old = """    // Current behavior, not desired, pinned deliberately: the replay publish is
-    // gated on local admission and this prompt was never admitted, so the
-    // settlement the live path withheld is never re-published (#12230).
-    expect(settlements).toEqual([]);
-"""
-          new = """    expect(settlements).toEqual([
-      {
-        sessionId: 'session-settle-repair',
-        promptId: 'prompt-live',
-        outcome: 'completed',
-        stopReason: 'end_turn',
-      },
-    ]);
-"""
-          if text.count(old) != 1:
-              raise SystemExit('baseline oracle anchor count mismatch')
-          path.write_text(text.replace(old, new))
+          p = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          s = p.read_text()
+          old = "    // Current behavior, not desired, pinned deliberately: the replay publish is\n    // gated on local admission and this prompt was never admitted, so the\n    // settlement the live path withheld is never re-published (#12230).\n    expect(settlements).toEqual([]);\n"
+          new = "    expect(settlements).toEqual([\n      {\n        sessionId: 'session-settle-repair',\n        promptId: 'prompt-live',\n        outcome: 'completed',\n        stopReason: 'end_turn',\n      },\n    ]);\n"
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new, 1))
           PY
           set +e
           (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME") > "$RUNNER_TEMP/baseline.log" 2>&1
           rc=$?
           set -e
-          if [ "$rc" -eq 0 ]; then
-            echo 'Baseline unexpectedly passed the desired settlement assertion'
-            cat "$RUNNER_TEMP/baseline.log"
-            exit 1
-          fi
+          test "$rc" -ne 0
           grep -F "$TEST_NAME" "$RUNNER_TEMP/baseline.log"
           grep -E 'AssertionError|expected .*deeply equal|expected.*to deeply equal' "$RUNNER_TEMP/baseline.log"
           git restore --source=HEAD --staged --worktree packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
           test -z "$(git status --short)"
-
-      - name: Apply minimal product repair and regression expectation
-        shell: bash
+      - name: Apply minimal repair and regression expectation
         run: |
           set -euo pipefail
-          python3 <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
-
-          source = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx')
-          text = source.read_text()
-          replacements = [
-              (
-                  """  terminalSeen: boolean;
-  attempted: boolean;
-""",
-                  """  terminalSeen: boolean;
-  withheldSettlement?: DaemonPromptSettledEvent;
-  attempted: boolean;
-""",
-              ),
-              (
-                  """                if (settlement && !repairTargetsTerminal) {
-                  publishPromptSettlement(settlement);
-                }
-""",
-                  """                if (settlement) {
-                  if (repairTargetsTerminal && pendingRepair) {
-                    pendingRepair.withheldSettlement = settlement;
-                  } else {
-                    publishPromptSettlement(settlement);
-                  }
-                }
-""",
-              ),
-              (
-                  """              } else if (repairingEpisode) {
-                liveJournalRepairRef.current = undefined;
-              }
-""",
-                  """              } else if (repairingEpisode) {
-                liveJournalRepairRef.current = undefined;
-                if (repairingEpisode.withheldSettlement) {
-                  publishPromptSettlement(repairingEpisode.withheldSettlement);
-                }
-              }
-""",
-              ),
+          p = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx')
+          s = p.read_text()
+          pairs = [
+            ("  terminalSeen: boolean;\n  attempted: boolean;\n", "  terminalSeen: boolean;\n  withheldSettlement?: DaemonPromptSettledEvent;\n  attempted: boolean;\n"),
+            ("                if (settlement && !repairTargetsTerminal) {\n                  publishPromptSettlement(settlement);\n                }\n", "                if (settlement) {\n                  if (repairTargetsTerminal && pendingRepair) {\n                    pendingRepair.withheldSettlement = settlement;\n                  } else {\n                    publishPromptSettlement(settlement);\n                  }\n                }\n"),
+            ("              } else if (repairingEpisode) {\n                liveJournalRepairRef.current = undefined;\n              }\n", "              } else if (repairingEpisode) {\n                liveJournalRepairRef.current = undefined;\n                if (repairingEpisode.withheldSettlement) {\n                  publishPromptSettlement(repairingEpisode.withheldSettlement);\n                }\n              }\n"),
           ]
-          for old, new in replacements:
-              if text.count(old) != 1:
-                  raise SystemExit(f'product anchor count mismatch: {old[:60]!r}')
-              text = text.replace(old, new)
-          source.write_text(text)
-
-          test = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
-          text = test.read_text()
-          old_intro = """    // The repair reload reads the whole turn back. Its replay publishes
-    // nothing here either — the prompt was never locally bound — so the
-    // assertion below cannot be satisfied by a second, post-repair publish.
-"""
-          new_intro = """    // The repair reload reads the whole turn back. Replay remains gated on
-    // local admission, so this never-bound prompt can settle only by re-publishing
-    // the one live settlement withheld specifically for this repair.
-"""
-          old_final = """    // Current behavior, not desired, pinned deliberately: the replay publish is
-    // gated on local admission and this prompt was never admitted, so the
-    // settlement the live path withheld is never re-published (#12230).
-    expect(settlements).toEqual([]);
-"""
-          new_final = """    expect(settlements).toEqual([
-      {
-        sessionId: 'session-settle-repair',
-        promptId: 'prompt-live',
-        outcome: 'completed',
-        stopReason: 'end_turn',
-      },
-    ]);
-"""
-          for old, new in ((old_intro, new_intro), (old_final, new_final)):
-              if text.count(old) != 1:
-                  raise SystemExit(f'test anchor count mismatch: {old[:60]!r}')
-              text = text.replace(old, new)
-          test.write_text(text)
+          for old, new in pairs:
+              assert s.count(old) == 1, old[:80]
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+          p = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          s = p.read_text()
+          pairs = [
+            ("    // The repair reload reads the whole turn back. Its replay publishes\n    // nothing here either — the prompt was never locally bound — so the\n    // assertion below cannot be satisfied by a second, post-repair publish.\n", "    // The repair reload reads the whole turn back. Replay remains gated on\n    // local admission, so this never-bound prompt can settle only by re-publishing\n    // the one live settlement withheld specifically for this repair.\n"),
+            ("    // Current behavior, not desired, pinned deliberately: the replay publish is\n    // gated on local admission and this prompt was never admitted, so the\n    // settlement the live path withheld is never re-published (#12230).\n    expect(settlements).toEqual([]);\n", "    expect(settlements).toEqual([\n      {\n        sessionId: 'session-settle-repair',\n        promptId: 'prompt-live',\n        outcome: 'completed',\n        stopReason: 'end_turn',\n      },\n    ]);\n"),
+          ]
+          for old, new in pairs:
+              assert s.count(old) == 1, old[:80]
+              s = s.replace(old, new, 1)
+          p.write_text(s)
           PY
-          changed="$(git diff --name-only | sort)"
           expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
-          test "$changed" = "$expected"
+          test "$(git diff --name-only | sort)" = "$expected"
           git diff --check
           git diff > "$RUNNER_TEMP/candidate.patch"
-
       - name: Run focused regression and Web Shell quality gates
-        shell: bash
         run: |
           set -euo pipefail
           cd packages/web-shell
@@ -191,22 +98,17 @@ jobs:
           npm run typecheck
           npm run lint
           npm run format:check
-
       - name: Run literal repository preflight
-        shell: bash
         run: |
           set -euo pipefail
           npm run preflight
-
       - name: Audit exact patched source
         if: always()
-        shell: bash
         run: |
           set -euo pipefail
           git diff --check
-          changed="$(git diff --name-only | sort)"
           expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
-          test "$changed" = "$expected"
+          test "$(git diff --name-only | sort)" = "$expected"
           git diff > "$RUNNER_TEMP/after.patch"
           cmp "$RUNNER_TEMP/candidate.patch" "$RUNNER_TEMP/after.patch"
           test -z "$(git diff --cached --name-only)"
