@@ -57,12 +57,13 @@ jobs:
           p.write_text(s.replace(old,new,1))
           PY
           set +e
-          corepack pnpm exec vitest run --config packages/web-shell/vitest.config.ts packages/web-shell/client/build-boundary.test.ts > "$RUNNER_TEMP/css-negative.log" 2>&1
-          rc=$?
+          corepack pnpm exec vitest run --config packages/web-shell/vitest.config.ts packages/web-shell/client/build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled' > "$RUNNER_TEMP/css-negative.log" 2>&1
+          css_rc=$?
           set -e
-          test "$rc" -ne 0
-          grep -F 'mermaid/dist/mermaid.css' "$RUNNER_TEMP/css-negative.log"
           cp "$RUNNER_TEMP/build-boundary.ts" packages/web-shell/build-boundary.ts
+          test "$css_rc" -ne 0
+          corepack pnpm exec vitest run --config packages/web-shell/vitest.config.ts packages/web-shell/client/build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled' > "$RUNNER_TEMP/css-positive.log" 2>&1 || { tail -80 "$RUNNER_TEMP/css-positive.log"; exit 1; }
+
           cp packages/web-templates/src/export-html/document-mcp-stub-guard.mjs "$RUNNER_TEMP/mcp-guard.mjs"
           python3 - <<'PY'
           from pathlib import Path
@@ -71,13 +72,15 @@ jobs:
           p.write_text(s.replace(old,'  return true || inputs.some((input) =>\n',1))
           PY
           set +e
-          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js > "$RUNNER_TEMP/stub-negative.log" 2>&1
-          rc=$?
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js -t 'rejects a document graph that only reaches the transcript entry' > "$RUNNER_TEMP/stub-negative.log" 2>&1
+          stub_rc=$?
           set -e
-          test "$rc" -ne 0
-          grep -F 'rejects a document graph that only reaches the transcript entry' "$RUNNER_TEMP/stub-negative.log"
           cp "$RUNNER_TEMP/mcp-guard.mjs" packages/web-templates/src/export-html/document-mcp-stub-guard.mjs
+          test "$stub_rc" -ne 0
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js -t 'rejects a document graph that only reaches the transcript entry' > "$RUNNER_TEMP/stub-positive.log" 2>&1 || { tail -80 "$RUNNER_TEMP/stub-positive.log"; exit 1; }
           git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
       - name: Build exact candidate and run focused regressions
         run: |
           set -euo pipefail
