@@ -1,0 +1,119 @@
+name: Validate 12310 pack membership
+
+on:
+  push:
+    branches:
+      - validation/12310-pack-membership
+    paths:
+      - .github/workflows/validate-12310-pack-membership.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SOURCE_SHA: 2aa8ae20f8dd4d2d1647c126e0a03e87ef3f0558
+      BASE_SHA: be9ed41afd2f59492cd372fbe1d52b653e42f3b8
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: 2aa8ae20f8dd4d2d1647c126e0a03e87ef3f0558
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Verify immutable source and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          git diff --check "$BASE_SHA" "$SOURCE_SHA"
+          actual="$(git diff --name-only "$BASE_SHA" "$SOURCE_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            packages/web-shell/scripts/verify-publish-artifacts.mjs \
+            scripts/tests/web-shell-publish-artifacts.test.js | sort)"
+          test "$actual" = "$expected"
+          node --version
+          corepack --version
+          df -h .
+
+      - name: Install locked diagnostic prerequisites
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Check changed-file formatting
+        run: |
+          node_modules/.bin/prettier --experimental-cli --check \
+            packages/web-shell/scripts/verify-publish-artifacts.mjs \
+            scripts/tests/web-shell-publish-artifacts.test.js
+
+      - name: Run focused publish-verifier regressions
+        run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js
+
+      - name: Build Web Shell publish artifacts
+        run: |
+          npm run build --workspace=packages/sdk-typescript
+          npm run build --workspace=packages/web-shell
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+
+      - name: Prove old verifier false-passes omitted packed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=packages/web-shell/package.json
+          base_verifier=packages/web-shell/scripts/verify-publish-artifacts.base.mjs
+          cp "$manifest" "$RUNNER_TEMP/web-shell-package.json"
+          cleanup() {
+            cp "$RUNNER_TEMP/web-shell-package.json" "$manifest"
+            rm -f "$base_verifier"
+          }
+          trap cleanup EXIT
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('packages/web-shell/package.json')
+          data = json.loads(path.read_text())
+          data['files'] = ['dist/types']
+          path.write_text(json.dumps(data, indent=2) + '\n')
+          PY
+          git show "$BASE_SHA:packages/web-shell/scripts/verify-publish-artifacts.mjs" > "$base_verifier"
+
+          set +e
+          node "$base_verifier" >"$RUNNER_TEMP/base-verifier.log" 2>&1
+          base_status=$?
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs \
+            >"$RUNNER_TEMP/candidate-verifier.log" 2>&1
+          candidate_status=$?
+          set -e
+
+          test "$base_status" -eq 0
+          test "$candidate_status" -ne 0
+          grep -F 'exists but is omitted from npm pack' "$RUNNER_TEMP/candidate-verifier.log"
+          cleanup
+          trap - EXIT
+          git diff --exit-code -- "$manifest"
+
+      - name: Run unchanged repository preflight
+        run: npm run preflight
+
+      - name: Audit exact final source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
