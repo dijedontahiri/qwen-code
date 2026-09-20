@@ -1,0 +1,42 @@
+name: Validate 12185 packed export guard baseline
+
+on:
+  push:
+    branches:
+      - validation/12185-packed-guard-baseline
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 737d013bfa3013ec0c391e3d413877d475d31f9e
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - name: Install locked dependencies without lifecycle scripts
+        run: corepack pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prove baseline regression is red
+        run: |
+          set +e
+          node_modules/.bin/vitest run --config scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js > /tmp/baseline.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/baseline.log
+          if [ "$status" -eq 0 ]; then
+            echo "Expected the regression to fail on the baseline verifier"
+            exit 1
+          fi
+          grep -F "expected 0 to be 1" /tmp/baseline.log
+      - name: Confirm immutable candidate source
+        run: |
+          test "$(git rev-parse HEAD)" = "737d013bfa3013ec0c391e3d413877d475d31f9e"
+          test -z "$(git status --porcelain --untracked-files=no)"
