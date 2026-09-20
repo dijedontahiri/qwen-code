@@ -128,11 +128,7 @@ describe('web-shell publish artifact verifier', () => {
 
   it('accepts a packed wildcard export target without statting the literal star', () => {
     const result = runVerifier((fixture) => {
-      declarePackage(
-        fixture,
-        { './*': './dist/src/*' },
-        ['dist/src/*'],
-      );
+      declarePackage(fixture, { './*': './dist/src/*' }, ['dist/src/*']);
       write(fixture, 'dist/src/example.js', 'export default 1;\n');
     });
 
@@ -148,7 +144,9 @@ describe('web-shell publish artifact verifier', () => {
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('./dist/src/* matches dist/src/example.js');
+    expect(result.stderr).toContain(
+      './dist/src/* matches dist/src/example.js',
+    );
     expect(result.stderr).toContain('not included in the npm package');
   });
 
