@@ -1,0 +1,70 @@
+name: Diagnose PR 12191 preflight stage
+on:
+  push:
+    branches: [validation/12191-current-main-r5]
+    paths: [.github/workflows/maintenance-12191-preflight-diagnose.yml]
+permissions:
+  contents: read
+jobs:
+  split-preflight:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: candidate
+            source_sha: 7d7be1d55376aec2f99a167d9238d774e6887005
+          - label: unchanged-base
+            source_sha: eceaede18ea5c37404b79974c6d4833c12c23935
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ matrix.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify immutable ${{ matrix.label }} source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ matrix.source_sha }}"
+          node --version
+          corepack pnpm --version
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Prime locked dependencies for clean
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/prime-install.log" 2>&1 || { tail -120 "$RUNNER_TEMP/prime-install.log"; exit 1; }
+          git restore --source=HEAD --staged --worktree .
+      - name: preflight / clean
+        run: npm run clean
+      - name: preflight / locked install
+        run: corepack pnpm install --frozen-lockfile
+      - name: preflight / format
+        run: npm run format
+      - name: preflight / lint
+        run: npm run lint:ci
+      - name: preflight / build
+        run: npm run build
+      - name: preflight / typecheck
+        run: npm run typecheck
+      - name: preflight / test:ci
+        run: npm run test:ci
+      - name: preflight / serve fast-path bundle
+        run: npm run check:serve-fast-path-bundle
+      - name: Audit immutable source residue
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ matrix.source_sha }}"
+          git status --short
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
