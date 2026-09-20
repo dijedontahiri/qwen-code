@@ -60,7 +60,7 @@ jobs:
           p.write_text(s.replace(old,new,1))
           PY
           set +e
-          (cd packages/web-shell && corepack pnpm exec vitest run --config vitest.config.ts build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled') > "$RUNNER_TEMP/css-negative.log" 2>&1
+          (cd packages/web-shell && NO_COLOR=1 corepack pnpm exec vitest run --config vitest.config.ts build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled') > "$RUNNER_TEMP/css-negative.log" 2>&1
           css_rc=$?
           set -e
           cp "$RUNNER_TEMP/build-boundary.ts" packages/web-shell/build-boundary.ts
@@ -71,7 +71,7 @@ jobs:
           fi
           grep -F 'keeps dependency stylesheet entrypoints bundled' "$RUNNER_TEMP/css-negative.log" >/dev/null || { tail -100 "$RUNNER_TEMP/css-negative.log"; exit 1; }
           grep -F 'AssertionError: expected true to be false' "$RUNNER_TEMP/css-negative.log" >/dev/null || { tail -100 "$RUNNER_TEMP/css-negative.log"; exit 1; }
-          (cd packages/web-shell && corepack pnpm exec vitest run --config vitest.config.ts build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled') > "$RUNNER_TEMP/css-positive.log" 2>&1 || { tail -80 "$RUNNER_TEMP/css-positive.log"; exit 1; }
+          (cd packages/web-shell && NO_COLOR=1 corepack pnpm exec vitest run --config vitest.config.ts build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled') > "$RUNNER_TEMP/css-positive.log" 2>&1 || { tail -80 "$RUNNER_TEMP/css-positive.log"; exit 1; }
           grep -E '1 passed|Tests +1 passed' "$RUNNER_TEMP/css-positive.log" >/dev/null || { cat "$RUNNER_TEMP/css-positive.log"; exit 1; }
 
           cp packages/web-templates/src/export-html/document-mcp-stub-guard.mjs "$RUNNER_TEMP/mcp-guard.mjs"
