@@ -1,0 +1,115 @@
+name: Diagnose issue 12277 full-suite status r1
+on:
+  push:
+    branches: [diagnostic/12277-b643-status-r1]
+    paths: [.github/workflows/diagnose-12277-b643-status-r1.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      PRODUCT_SHA: b6437572385d29cd24ed5063c2edbdedcbdd965c
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Verify exact source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          corepack enable
+      - name: Install locked dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: corepack pnpm install --frozen-lockfile
+      - id: default
+        name: Run full focused file with default reporter
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts
+      - id: json
+        name: Run full focused file with JSON reporter
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts --reporter=json --outputFile=/tmp/12277.json
+      - id: classify
+        name: Classify JSON assertions
+        if: always()
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs=require('fs');
+          const d=JSON.parse(fs.readFileSync('/tmp/12277.json','utf8'));
+          const a=d.testResults.flatMap(r=>r.assertionResults||[]);
+          const names={
+            lifecycle:'serializes lifecycle changes and fully revokes state on disable',
+            ordering:'orders disable after an in-flight enable',
+            target:'validates target before committing listener state',
+            sleep:'reports sleep inhibition only when the inhibitor is running',
+            fallback:'falls back to a free LAN port when the preferred port is in use'
+          };
+          const out=[];
+          for (const [key,needle] of Object.entries(names)) {
+            const matches=a.filter(x=>String(x.fullName||x.title||'').includes(needle));
+            out.push(`${key}=${matches.length===1?matches[0].status:'count-'+matches.length}`);
+          }
+          out.push(`success=${String(d.success)}`);
+          out.push(`failed_tests=${String(d.numFailedTests)}`);
+          out.push(`failed_suites=${String(d.numFailedTestSuites)}`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,out.join('\n')+'\n');
+          NODE
+      - name: Default full command passed
+        if: always()
+        env: { OUTCOME: '${{ steps.default.outcome }}' }
+        run: test "$OUTCOME" = success
+      - name: JSON full command passed
+        if: always()
+        env: { OUTCOME: '${{ steps.json.outcome }}' }
+        run: test "$OUTCOME" = success
+      - name: Lifecycle assertion passed
+        if: always()
+        env: { STATUS: '${{ steps.classify.outputs.lifecycle }}' }
+        run: test "$STATUS" = passed
+      - name: Ordering assertion passed
+        if: always()
+        env: { STATUS: '${{ steps.classify.outputs.ordering }}' }
+        run: test "$STATUS" = passed
+      - name: Target assertion passed
+        if: always()
+        env: { STATUS: '${{ steps.classify.outputs.target }}' }
+        run: test "$STATUS" = passed
+      - name: Sleep assertion passed
+        if: always()
+        env: { STATUS: '${{ steps.classify.outputs.sleep }}' }
+        run: test "$STATUS" = passed
+      - name: Fallback assertion passed
+        if: always()
+        env: { STATUS: '${{ steps.classify.outputs.fallback }}' }
+        run: test "$STATUS" = passed
+      - name: JSON suite success flag true
+        if: always()
+        env: { STATUS: '${{ steps.classify.outputs.success }}' }
+        run: test "$STATUS" = true
+      - name: JSON zero failed tests
+        if: always()
+        env: { STATUS: '${{ steps.classify.outputs.failed_tests }}' }
+        run: test "$STATUS" = 0
+      - name: JSON zero failed suites
+        if: always()
+        env: { STATUS: '${{ steps.classify.outputs.failed_suites }}' }
+        run: test "$STATUS" = 0
+      - name: Audit immutable source
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
