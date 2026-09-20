@@ -13,6 +13,8 @@ jobs:
     env:
       BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
       TARGET_TEST: sniffs an untyped embedded PNG ResourceBlock
+      TEST_B64: ICAgIGl0KCdzbmlmZnMgYW4gdW50eXBlZCBlbWJlZGRlZCBQTkcgUmVzb3VyY2VCbG9jaycsIGFzeW5jICgpID0+IHsKICAgICAgY29uc3QgcGFyYW1zID0geyBwYXJhbTogJ2dldCcgfTsKICAgICAgY29uc3QgcG5nU2lnbmF0dXJlID0gJ2lWQk9SdzBLR2dvPSc7CiAgICAgIGNvbnN0IHNka1Jlc3BvbnNlOiBQYXJ0W10gPSBbCiAgICAgICAgewogICAgICAgICAgZnVuY3Rpb25SZXNwb25zZTogewogICAgICAgICAgICBuYW1lOiBzZXJ2ZXJUb29sTmFtZSwKICAgICAgICAgICAgcmVzcG9uc2U6IHsKICAgICAgICAgICAgICBjb250ZW50OiBbCiAgICAgICAgICAgICAgICB7CiAgICAgICAgICAgICAgICAgIHR5cGU6ICdyZXNvdXJjZScsCiAgICAgICAgICAgICAgICAgIHJlc291cmNlOiB7CiAgICAgICAgICAgICAgICAgICAgdXJpOiAnZmlsZTovLy9wYXRoL3RvL2ltYWdlLmJpbicsCiAgICAgICAgICAgICAgICAgICAgYmxvYjogcG5nU2lnbmF0dXJlLAogICAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICBdLAogICAgICAgICAgICB9LAogICAgICAgICAgfSwKICAgICAgICB9LAogICAgICBdOwogICAgICBtb2NrQ2FsbFRvb2wubW9ja1Jlc29sdmVkVmFsdWUoc2RrUmVzcG9uc2UpOwoKICAgICAgY29uc3QgaW52b2NhdGlvbiA9IHRvb2wuYnVpbGQocGFyYW1zKTsKICAgICAgY29uc3QgdG9vbFJlc3VsdCA9IGF3YWl0IGludm9jYXRpb24uZXhlY3V0ZShuZXcgQWJvcnRDb250cm9sbGVyKCkuc2lnbmFsKTsKCiAgICAgIGV4cGVjdCh0b29sUmVzdWx0LmxsbUNvbnRlbnQpLnRvRXF1YWwoWwogICAgICAgIHsKICAgICAgICAgIHRleHQ6IGBbVG9vbCAnJHtzZXJ2ZXJUb29sTmFtZX0nIHByb3ZpZGVkIHRoZSBmb2xsb3dpbmcgZW1iZWRkZWQgcmVzb3VyY2Ugd2l0aCBtaW1lLXR5cGU6IGltYWdlL3BuZ11gLAogICAgICAgIH0sCiAgICAgICAgewogICAgICAgICAgaW5saW5lRGF0YTogewogICAgICAgICAgICBtaW1lVHlwZTogJ2ltYWdlL3BuZycsCiAgICAgICAgICAgIGRhdGE6IHBuZ1NpZ25hdHVyZSwKICAgICAgICAgIH0sCiAgICAgICAgfSwKICAgICAgXSk7CiAgICAgIGV4cGVjdCh0b29sUmVzdWx0LnJldHVybkRpc3BsYXkpLnRvQmUoCiAgICAgICAgYFtUb29sICcke3NlcnZlclRvb2xOYW1lfScgcHJvdmlkZWQgdGhlIGZvbGxvd2luZyBlbWJlZGRlZCByZXNvdXJjZSB3aXRoIG1pbWUtdHlwZTogaW1hZ2UvcG5nXVxuW2ltYWdlL3BuZ11gLAogICAgICApOwogICAgfSk7Cgo=
+      PROD_B64: ICBpZiAocmVzb3VyY2U/LmJsb2IpIHsKICAgIGxldCBtaW1lVHlwZSA9IHJlc291cmNlLm1pbWVUeXBlOwogICAgaWYgKCFtaW1lVHlwZSkgewogICAgICAvLyBEZWNvZGUgb25seSB0aGUgYWxpZ25lZCBwcmVmaXggbmVlZGVkIGJ5IHRoZSBleGlzdGluZyBtYWdpYy1ieXRlCiAgICAgIC8vIHNuaWZmZXI7IGRvIG5vdCBhbGxvY2F0ZSB0aGUgd2hvbGUgdW50cnVzdGVkIE1DUCBwYXlsb2FkIGp1c3QgdG8KICAgICAgLy8gZGV0ZXJtaW5lIHdoZXRoZXIgYW4gb3RoZXJ3aXNlLXVudHlwZWQgcmVzb3VyY2UgaXMgYSBtb2RlbC1zYWZlIGltYWdlLgogICAgICBjb25zdCBraW5kID0gc25pZmZGaWxlS2luZCgKICAgICAgICBCdWZmZXIuZnJvbShyZXNvdXJjZS5ibG9iLnNsaWNlKDAsIDI0KSwgJ2Jhc2U2NCcpLAogICAgICAgICcnLAogICAgICAgICcnLAogICAgICAgICcnLAogICAgICApOwogICAgICBpZiAoCiAgICAgICAga2luZC5tYWdpY01hdGNoZWQgJiYKICAgICAgICBbJ2ltYWdlL2pwZWcnLCAnaW1hZ2UvcG5nJywgJ2ltYWdlL3dlYnAnXS5pbmNsdWRlcyhraW5kLm1pbWVUeXBlKQogICAgICApIHsKICAgICAgICBtaW1lVHlwZSA9IGtpbmQubWltZVR5cGU7CiAgICAgIH0KICAgIH0KICAgIG1pbWVUeXBlIHx8PSAnYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtJzsKICAgIHJldHVybiBbCg==
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
@@ -47,53 +49,12 @@ jobs:
           set -euo pipefail
           cp packages/core/src/tools/mcp-tool.test.ts "$RUNNER_TEMP/mcp-tool.test.ts"
           python3 - <<'PY'
+          import base64, os
           from pathlib import Path
           p = Path('packages/core/src/tools/mcp-tool.test.ts')
           s = p.read_text()
           anchor = "    it('should handle a mix of content block types', async () => {\n"
-          test = r'''    it('sniffs an untyped embedded PNG ResourceBlock', async () => {
-      const params = { param: 'get' };
-      const pngSignature = 'iVBORw0KGgo=';
-      const sdkResponse: Part[] = [
-        {
-          functionResponse: {
-            name: serverToolName,
-            response: {
-              content: [
-                {
-                  type: 'resource',
-                  resource: {
-                    uri: 'file:///path/to/image.bin',
-                    blob: pngSignature,
-                  },
-                },
-              ],
-            },
-          },
-        },
-      ];
-      mockCallTool.mockResolvedValue(sdkResponse);
-
-      const invocation = tool.build(params);
-      const toolResult = await invocation.execute(new AbortController().signal);
-
-      expect(toolResult.llmContent).toEqual([
-        {
-          text: `[Tool '${serverToolName}' provided the following embedded resource with mime-type: image/png]`,
-        },
-        {
-          inlineData: {
-            mimeType: 'image/png',
-            data: pngSignature,
-          },
-        },
-      ]);
-      expect(toolResult.returnDisplay).toBe(
-        `[Tool '${serverToolName}' provided the following embedded resource with mime-type: image/png]\n[image/png]`,
-      );
-    });
-
-'''
+          test = base64.b64decode(os.environ['TEST_B64']).decode()
           assert s.count(anchor) == 1, s.count(anchor)
           p.write_text(s.replace(anchor, test + anchor, 1))
           PY
@@ -113,6 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import base64, os
           from pathlib import Path
           p = Path('packages/core/src/tools/mcp-tool.ts')
           s = p.read_text()
@@ -120,57 +82,14 @@ jobs:
           addition = "import { sniffFileKind } from '../utils/binary-content.js';\n"
           assert s.count(anchor) == 1, s.count(anchor)
           s = s.replace(anchor, anchor + addition, 1)
-          old = """  if (resource?.blob) {\n    const mimeType = resource.mimeType || 'application/octet-stream';\n    return [\n"""
-          new = """  if (resource?.blob) {\n    let mimeType = resource.mimeType;\n    if (!mimeType) {\n      // Decode only the aligned prefix needed by the existing magic-byte\n      // sniffer; do not allocate the whole untrusted MCP payload just to\n      // determine whether an otherwise-untyped resource is a model-safe image.\n      const kind = sniffFileKind(\n        Buffer.from(resource.blob.slice(0, 24), 'base64'),\n        '',\n        '',\n        '',\n      );\n      if (\n        kind.magicMatched &&\n        ['image/jpeg', 'image/png', 'image/webp'].includes(kind.mimeType)\n      ) {\n        mimeType = kind.mimeType;\n      }\n    }\n    mimeType ||= 'application/octet-stream';\n    return [\n"""
+          old = "  if (resource?.blob) {\n    const mimeType = resource.mimeType || 'application/octet-stream';\n    return [\n"
+          new = base64.b64decode(os.environ['PROD_B64']).decode()
           assert s.count(old) == 1, s.count(old)
           p.write_text(s.replace(old, new, 1))
-
           p = Path('packages/core/src/tools/mcp-tool.test.ts')
           s = p.read_text()
           anchor = "    it('should handle a mix of content block types', async () => {\n"
-          test = r'''    it('sniffs an untyped embedded PNG ResourceBlock', async () => {
-      const params = { param: 'get' };
-      const pngSignature = 'iVBORw0KGgo=';
-      const sdkResponse: Part[] = [
-        {
-          functionResponse: {
-            name: serverToolName,
-            response: {
-              content: [
-                {
-                  type: 'resource',
-                  resource: {
-                    uri: 'file:///path/to/image.bin',
-                    blob: pngSignature,
-                  },
-                },
-              ],
-            },
-          },
-        },
-      ];
-      mockCallTool.mockResolvedValue(sdkResponse);
-
-      const invocation = tool.build(params);
-      const toolResult = await invocation.execute(new AbortController().signal);
-
-      expect(toolResult.llmContent).toEqual([
-        {
-          text: `[Tool '${serverToolName}' provided the following embedded resource with mime-type: image/png]`,
-        },
-        {
-          inlineData: {
-            mimeType: 'image/png',
-            data: pngSignature,
-          },
-        },
-      ]);
-      expect(toolResult.returnDisplay).toBe(
-        `[Tool '${serverToolName}' provided the following embedded resource with mime-type: image/png]\n[image/png]`,
-      );
-    });
-
-'''
+          test = base64.b64decode(os.environ['TEST_B64']).decode()
           assert s.count(anchor) == 1, s.count(anchor)
           p.write_text(s.replace(anchor, test + anchor, 1))
           PY
@@ -189,10 +108,7 @@ jobs:
           set -euo pipefail
           npm run typecheck --workspace=@qwen-code/core
           npm run lint --workspace=@qwen-code/core > "$RUNNER_TEMP/lint.log" 2>&1 || { tail -120 "$RUNNER_TEMP/lint.log"; exit 1; }
-          printf '%s\0' \
-            packages/core/src/tools/mcp-tool.ts \
-            packages/core/src/tools/mcp-tool.test.ts \
-            | xargs -0 node_modules/.bin/prettier --check
+          printf '%s\0' packages/core/src/tools/mcp-tool.ts packages/core/src/tools/mcp-tool.test.ts | xargs -0 node_modules/.bin/prettier --check
           git diff --check
           git diff --name-only "$BASE_SHA" -- | sort | tee "$RUNNER_TEMP/changed.txt"
           test "$(wc -l < "$RUNNER_TEMP/changed.txt")" -eq 2
@@ -201,10 +117,7 @@ jobs:
       - name: Capture candidate files
         run: |
           set -euo pipefail
-          git diff --binary "$BASE_SHA" -- \
-            packages/core/src/tools/mcp-tool.ts \
-            packages/core/src/tools/mcp-tool.test.ts \
-            > "$RUNNER_TEMP/candidate.diff"
+          git diff --binary "$BASE_SHA" -- packages/core/src/tools/mcp-tool.ts packages/core/src/tools/mcp-tool.test.ts > "$RUNNER_TEMP/candidate.diff"
           test -s "$RUNNER_TEMP/candidate.diff"
       - name: Upload candidate files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
