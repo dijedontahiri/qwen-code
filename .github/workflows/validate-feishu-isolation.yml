@@ -1,0 +1,74 @@
+name: Diagnose Feishu preflight failures
+
+on:
+  push:
+    branches: [validation/12191-failure-isolation-20260920]
+    paths: [.github/workflows/validate-feishu-isolation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - source: baseline
+            sha: e45362e2c2af9cc765a43c02815c813e9551f53a
+          - source: product
+            sha: 3ec369460d5e667289e297961457dd259dba42a7
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Verify source and install diagnostic prerequisites
+        env:
+          SOURCE_SHA: ${{ matrix.sha }}
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          node --version
+          npm --version
+          if node -e 'process.exit(require("./package.json").packageManager?.startsWith("pnpm@") ? 0 : 1)'; then
+            corepack pnpm install --frozen-lockfile
+          else
+            npm ci --no-audit --no-fund
+          fi
+          echo 'Diagnostic only: repository-supported QWEN_SKIP_PREPARE avoids unrelated full-build prerequisites. No full preflight acceptance is claimed.'
+      - name: Inspect relevant source boundaries and test identity
+        run: |
+          set -euo pipefail
+          git hash-object packages/channels/feishu/src/adapter.test.ts packages/channels/feishu/src/FeishuAdapter.ts packages/channels/feishu/vitest.config.ts
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/channels/feishu/src/FeishuAdapter.ts')
+          lines = p.read_text().splitlines()
+          markers = ('private onMessage(', 'async extractMedia(', 'async processMessage(', 'async handleMedia', 'protected onPromptStart(', 'protected async onPromptEnd(')
+          for i, line in enumerate(lines):
+              if any(marker in line for marker in markers):
+                  print(f'\n--- {p}:{i + 1} ---')
+                  for j in range(max(0, i - 2), min(len(lines), i + 90)):
+                      print(f'{j + 1}: {lines[j]}')
+          PY
+      - name: Run unchanged full Feishu suite once
+        working-directory: packages/channels/feishu
+        run: ../../../node_modules/.bin/vitest run --reporter=verbose
+      - name: Verify no source changes
+        if: always()
+        env:
+          SOURCE_SHA: ${{ matrix.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
