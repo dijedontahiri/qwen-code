@@ -3,7 +3,7 @@ name: Validate 12310 packed publish guard
 on:
   push:
     branches:
-      - validation/12310-packed-publish-guard
+      - validation/12310-packed-publish-guard-r2
 
 permissions:
   contents: read
@@ -12,7 +12,7 @@ jobs:
   linux-full:
     if: github.repository == 'dijedontahiri/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
