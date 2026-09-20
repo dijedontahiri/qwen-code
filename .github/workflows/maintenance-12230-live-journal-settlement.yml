@@ -2,8 +2,8 @@ name: Validate issue 12230 live-journal settlement repair
 
 on:
   push:
-    branches:
-      - validation/12230-live-journal-settlement
+    branches: [validation/12230-live-journal-settlement]
+    paths: [.github/workflows/maintenance-12230-live-journal-settlement.yml]
 
 permissions:
   contents: read
@@ -11,7 +11,7 @@ permissions:
 jobs:
   validate:
     if: github.repository == 'dijedontahiri/qwen-code'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 100
     env:
       BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
@@ -19,11 +19,12 @@ jobs:
       NO_COLOR: '1'
     steps:
       - name: Checkout immutable upstream base
-        uses: actions/checkout@v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: QwenLM/qwen-code
-          ref: ${{ env.BASE_SHA }}
+          ref: eceaede18ea5c37404b79974c6d4833c12c23935
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Verify environment and source identity
         shell: bash
@@ -32,20 +33,25 @@ jobs:
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test -z "$(git status --short)"
           node --version || true
-          df -h .
+          df -h . "$RUNNER_TEMP"
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version-file: .nvmrc
+          node-version: 22.16.0
 
       - name: Install locked dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
         shell: bash
         run: |
           set -euo pipefail
           corepack enable
           corepack pnpm --version
-          corepack pnpm install --frozen-lockfile
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -100 "$RUNNER_TEMP/install.log"; exit 1; }
+          npm run build
+          git restore --source=HEAD --staged --worktree .
+          test -z "$(git status --short)"
 
       - name: Prove baseline regression assertion fails
         shell: bash
@@ -84,7 +90,7 @@ jobs:
           fi
           grep -F "$TEST_NAME" "$RUNNER_TEMP/baseline.log"
           grep -E 'AssertionError|expected .*deeply equal|expected.*to deeply equal' "$RUNNER_TEMP/baseline.log"
-          git checkout -- packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+          git restore --source=HEAD --staged --worktree packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
           test -z "$(git status --short)"
 
       - name: Apply minimal product repair and regression expectation
