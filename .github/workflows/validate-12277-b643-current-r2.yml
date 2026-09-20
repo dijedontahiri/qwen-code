@@ -1,0 +1,117 @@
+name: Validate issue 12277 current exact source r2
+
+on:
+  push:
+    branches:
+      - validation/12277-b6437572-current-r2
+    paths:
+      - .github/workflows/validate-12277-b643-current-r2.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CI: 'true'
+      PRODUCT_SHA: b6437572385d29cd24ed5063c2edbdedcbdd965c
+      BASE_SHA: e75b8e53b033d38687f5d5cdfb7b620db3808218
+    steps:
+      - name: Checkout immutable product source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Verify exact source and issue scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test "$(node -p "require('./package.json').packageManager")" = "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000"
+          node --version
+          df -h .
+          git diff --check "$BASE_SHA" "$PRODUCT_SHA"
+          actual=$(git diff --name-only "$BASE_SHA" "$PRODUCT_SHA" | sort)
+          expected=$(printf '%s\n' \
+            packages/cli/src/serve/local-control/service.test.ts \
+            packages/cli/src/serve/local-control/service.ts | sort)
+          test "$actual" = "$expected"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Enable pinned package manager
+        run: |
+          corepack enable
+          corepack pnpm --version
+
+      - name: Install locked dependencies for focused validation
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Prove current main rejects the busy preferred LAN port
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout "$BASE_SHA" -- packages/cli/src/serve/local-control/service.ts
+          set +e
+          npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'falls back to a free LAN port when the preferred port is in use' 2>&1 | tee /tmp/12277-baseline.log
+          status=${PIPESTATUS[0]}
+          set -e
+          git checkout "$PRODUCT_SHA" -- packages/cli/src/serve/local-control/service.ts
+          test "$status" -ne 0
+          grep -Fq 'falls back to a free LAN port when the preferred port is in use' /tmp/12277-baseline.log
+          test -z "$(git diff --name-only "$PRODUCT_SHA" -- packages/cli/src/serve/local-control/service.ts)"
+
+      - name: Run focused Local Control regression
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts
+
+      - name: Check changed-file formatting
+        run: npx prettier --experimental-cli --check packages/cli/src/serve/local-control/service.ts packages/cli/src/serve/local-control/service.test.ts
+
+      - name: Lint changed files
+        run: npx eslint packages/cli/src/serve/local-control/service.ts packages/cli/src/serve/local-control/service.test.ts --max-warnings 0
+
+      - id: preflight
+        name: Run literal repository preflight
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run preflight 2>&1 | tee /tmp/12277-preflight.log
+
+      - id: audit
+        name: Final immutable-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$BASE_SHA" "$PRODUCT_SHA"
+
+      - name: Require preflight and audit success
+        if: always()
+        shell: bash
+        env:
+          PREFLIGHT: ${{ steps.preflight.outcome }}
+          AUDIT: ${{ steps.audit.outcome }}
+        run: |
+          set -euo pipefail
+          echo "preflight=$PREFLIGHT audit=$AUDIT"
+          test "$PREFLIGHT" = success
+          test "$AUDIT" = success
