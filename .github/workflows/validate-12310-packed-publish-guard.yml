@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 989855dcecfe2576c4945aaef86e49943105050e
+          ref: 50f63dfb0a3b08d03dbaba36627f64ce30c7665c
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -42,7 +42,7 @@ jobs:
         run: npm run preflight
       - name: Confirm immutable clean source
         run: |
-          test "$(git rev-parse HEAD)" = "989855dcecfe2576c4945aaef86e49943105050e"
+          test "$(git rev-parse HEAD)" = "50f63dfb0a3b08d03dbaba36627f64ce30c7665c"
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
@@ -54,7 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 989855dcecfe2576c4945aaef86e49943105050e
+          ref: 50f63dfb0a3b08d03dbaba36627f64ce30c7665c
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -76,7 +76,7 @@ jobs:
       - name: Confirm immutable source
         shell: pwsh
         run: |
-          if ((git rev-parse HEAD) -ne "989855dcecfe2576c4945aaef86e49943105050e") { exit 1 }
+          if ((git rev-parse HEAD) -ne "50f63dfb0a3b08d03dbaba36627f64ce30c7665c") { exit 1 }
           git diff --exit-code
           git diff --cached --exit-code
           if ((git ls-files --others --exclude-standard)) { exit 1 }
