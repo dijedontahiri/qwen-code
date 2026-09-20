@@ -60,32 +60,38 @@ function runVerifier(fixtureRoot) {
 }
 
 describe('web-shell publish verifier', () => {
-  it('rejects an export that exists on disk but is omitted from npm pack', () => {
-    const fixtureRoot = fixture({ entry: './dist/nested/index.js' });
+  it(
+    'rejects an export that exists on disk but is omitted from npm pack',
+    () => {
+      const fixtureRoot = fixture({ entry: './dist/nested/index.js' });
 
-    const result = runVerifier(fixtureRoot);
+      const result = runVerifier(fixtureRoot);
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      './dist/nested/index.js was built but is not included in npm pack',
-    );
-  });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        './dist/nested/index.js was built but is not included in npm pack',
+      );
+    },
+  );
 
-  it('rejects a relative chunk that exists on disk but is omitted from npm pack', () => {
-    const fixtureRoot = fixture({
-      source: "export { value } from './nested/chunk.js';\n",
-    });
-    const chunk = path.join(fixtureRoot, 'dist/nested/chunk.js');
-    mkdirSync(path.dirname(chunk), { recursive: true });
-    writeFileSync(chunk, 'export const value = 1;\n');
+  it(
+    'rejects a relative chunk that exists on disk but is omitted from npm pack',
+    () => {
+      const fixtureRoot = fixture({
+        source: "export { value } from './nested/chunk.js';\n",
+      });
+      const chunk = path.join(fixtureRoot, 'dist/nested/chunk.js');
+      mkdirSync(path.dirname(chunk), { recursive: true });
+      writeFileSync(chunk, 'export const value = 1;\n');
 
-    const result = runVerifier(fixtureRoot);
+      const result = runVerifier(fixtureRoot);
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      './dist/index.js imports ./nested/chunk.js, which is not included in npm pack',
-    );
-  });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        './dist/index.js imports ./nested/chunk.js, which is not included in npm pack',
+      );
+    },
+  );
 
   it('accepts an export and relative chunk that npm packs', () => {
     const fixtureRoot = fixture({
