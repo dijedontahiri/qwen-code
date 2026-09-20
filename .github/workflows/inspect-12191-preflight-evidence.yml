@@ -1,4 +1,4 @@
-name: Inspect PR 12191 preflight evidence
+name: Inspect blocked contribution evidence
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Extract failure context without changing or rerunning product tests
+      - name: Extract exact Qwen assertion failure
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -26,12 +26,33 @@ jobs:
           import pathlib, re, sys
           text = pathlib.Path(sys.argv[1]).read_text(errors='replace')
           lines = re.sub(r'\x1b\[[0-9;]*m', '', text).splitlines()
-          matches = [i for i, line in enumerate(lines) if re.search(r'FAIL |AssertionError|Expected:|Received:|Test Files|Tests\s+\d+ failed|Error:', line)]
+          matches = [i for i, line in enumerate(lines) if re.search(r'\bFAIL\s+.*\.test\.|AssertionError: expected|Test Files\s+\d+ failed', line)]
           selected = set()
-          for i in matches[-15:]:
-              selected.update(range(max(0, i - 3), min(len(lines), i + 14)))
-          for i in sorted(selected):
+          for i in matches:
+              selected.update(range(max(0, i - 2), min(len(lines), i + 65)))
+          for i in sorted(selected)[:250]:
               print(f'{i + 1}: {lines[i]}')
           if not matches:
-              print('\n'.join(lines[-100:]))
+              raise SystemExit('No structured failure found; evidence extraction incomplete')
+          PY
+      - name: Extract Strapi browser failure without rerunning upstream jobs
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --allow-escape-sequences repos/strapi/strapi/actions/jobs/105660843251/logs > "$RUNNER_TEMP/strapi.log"
+          python3 - "$RUNNER_TEMP/strapi.log" <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path(sys.argv[1]).read_text(errors='replace')
+          lines = re.sub(r'\x1b\[[0-9;]*m', '', text).splitlines()
+          matches = [i for i, line in enumerate(lines) if re.search(r'\d+\) \[webkit\]|Error:.*(?:expect|Timeout)|TimeoutError|\b\d+ failed\b|\[error\]', line)]
+          selected = set()
+          for i in matches[-10:]:
+              selected.update(range(max(0, i - 3), min(len(lines), i + 45)))
+          for i in sorted(selected)[:250]:
+              print(f'{i + 1}: {lines[i]}')
+          if not matches:
+              print('\n'.join(lines[-80:]))
           PY
