@@ -1,0 +1,171 @@
+name: Validate PR 12191 upstream reconciliation
+on:
+  push:
+    branches: [validation/12191-merge-audit-20260920-r2]
+    paths: [.github/workflows/maintenance-12191-reconcile.yml]
+permissions:
+  contents: write
+concurrency:
+  group: maintenance-12191-reconcile-20260920-r2
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PRODUCT_SHA: 3ec369460d5e667289e297961457dd259dba42a7
+      UPSTREAM_SHA: be9ed41afd2f59492cd372fbe1d52b653e42f3b8
+      CANDIDATE_BRANCH: fix/12191-upstream-reconcile-20260920-r2
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 3ec369460d5e667289e297961457dd259dba42a7
+          fetch-depth: 500
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Reproduce and resolve only the reviewed size-budget conflict
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git fetch --no-tags --depth=500 https://github.com/QwenLM/qwen-code.git "$UPSTREAM_SHA"
+          git config user.name 'Dijedon'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          set +e
+          git -c core.hooksPath=/dev/null merge --no-commit --no-ff "$UPSTREAM_SHA" > "$RUNNER_TEMP/merge.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/merge.log"
+          test "$result" -eq 1
+          test "$(git diff --name-only --diff-filter=U)" = packages/web-templates/src/export-html/build.mjs
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('packages/web-templates/src/export-html/build.mjs')
+          s=p.read_text()
+          pattern=r'^<<<<<<< HEAD\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]+\n'
+          matches=list(re.finditer(pattern,s,re.M|re.S))
+          assert len(matches)==1, 'Unexpected conflict count'
+          ours,theirs=matches[0].group(1,2)
+          assert 'MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000' in ours
+          assert 'MAX_DOCUMENT_RUNTIME_BYTES = 2_030_000' in theirs
+          p.write_text(s[:matches[0].start()]+ours+s[matches[0].end():])
+          print('Retained reviewed 1,830,000 warning / 1,870,000 hard limit; no budget was relaxed.')
+          PY
+          git add packages/web-templates/src/export-html/build.mjs
+          git -c core.hooksPath=/dev/null commit -m 'fix(web-shell): reconcile document budget with upstream changes'
+          git diff --exit-code
+          git diff --cached --exit-code
+          git diff --check "$UPSTREAM_SHA" HEAD
+          git diff --name-only "$UPSTREAM_SHA" HEAD > "$RUNNER_TEMP/product-paths.txt"
+          cat "$RUNNER_TEMP/product-paths.txt"
+          python3 - <<'PY'
+          import os,subprocess
+          paths=subprocess.check_output(['git','diff','--name-only',os.environ['UPSTREAM_SHA'],'HEAD'],text=True).splitlines()
+          permitted=('.qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md','packages/web-shell/','packages/web-templates/src/export-html/','scripts/tests/document-mcp-stub-guard.test.js','scripts/tests/web-terminal-build.test.ts')
+          assert paths and all(p.startswith(permitted) for p in paths), paths
+          assert not any('/channels/' in p or p.startswith('.github/') for p in paths)
+          print('Web Shell/document scope verified; no unrelated Feishu or validation workflows in candidate.')
+          PY
+          echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "SOURCE_TREE=$(git rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+      - name: Install pinned dependencies for focused validation
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          node --version
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile > "$RUNNER_TEMP/install.log" 2>&1 || { tail -60 "$RUNNER_TEMP/install.log"; exit 1; }
+          tail -8 "$RUNNER_TEMP/install.log"
+          git diff --stat
+          git diff --exit-code -- package.json pnpm-lock.yaml packages/web-shell packages/web-templates/src/export-html scripts/tests
+          # Installation generates notices; restore those before testing immutable source.
+          git restore --source="$SOURCE_SHA" --staged --worktree .
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Build complete workspace and enforce document guards
+        run: |
+          set -euo pipefail
+          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -100 "$RUNNER_TEMP/build.log"; exit 1; }
+          grep -E 'Document export renderer|Document export|bytes|error' "$RUNNER_TEMP/build.log" | tail -25 || true
+          test -f packages/web-shell/dist/transcript.js
+          test -f packages/web-templates/src/export-html/dist/export-transcript-document.js
+          git diff --exit-code
+      - name: Verify Web Shell suite and script regressions
+        run: |
+          set -euo pipefail
+          npm run test:ci --workspace=@qwen-code/web-shell -- --retry=0 > "$RUNNER_TEMP/web-shell-tests.log" 2>&1 || { tail -90 "$RUNNER_TEMP/web-shell-tests.log"; exit 1; }
+          tail -12 "$RUNNER_TEMP/web-shell-tests.log"
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js scripts/tests/web-terminal-build.test.ts > "$RUNNER_TEMP/script-tests.log" 2>&1 || { tail -90 "$RUNNER_TEMP/script-tests.log"; exit 1; }
+          tail -15 "$RUNNER_TEMP/script-tests.log"
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell > "$RUNNER_TEMP/lint.log" 2>&1 || { tail -60 "$RUNNER_TEMP/lint.log"; exit 1; }
+          node_modules/.bin/prettier --check packages/web-templates/src/export-html/build.mjs
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Preserve the scoped-tested candidate without touching the upstream PR branch
+        id: preserve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          python3 - <<'PY'
+          import json,os,pathlib,subprocess
+          repo='dijedontahiri/qwen-code'
+          def gh(endpoint,payload=None):
+              args=['gh','api',f'repos/{repo}/{endpoint}']
+              if payload is not None: args += ['--method','POST','--input','-']
+              return json.loads(subprocess.check_output(args,input=None if payload is None else json.dumps(payload),text=True))
+          upstream=os.environ['UPSTREAM_SHA']
+          paths=subprocess.check_output(['git','diff','--name-only',upstream,'HEAD'],text=True).splitlines()
+          entries=[]
+          for p in paths:
+              raw=subprocess.check_output(['git','ls-tree','HEAD','--',p],text=True).strip()
+              if not raw:
+                  entries.append({'path':p,'mode':'100644','type':'blob','sha':None}); continue
+              mode,kind,oidpath=raw.split(' ',2)
+              assert mode in ('100644','100755') and kind=='blob',raw
+              content=pathlib.Path(p).read_text()
+              blob=gh('git/blobs',{'content':content,'encoding':'utf-8'})
+              assert blob['sha']==oidpath.split('\t',1)[0],p
+              entries.append({'path':p,'mode':mode,'type':'blob','sha':blob['sha']})
+          base_tree=subprocess.check_output(['git','rev-parse',upstream+'^{tree}'],text=True).strip()
+          tree=gh('git/trees',{'base_tree':base_tree,'tree':entries})
+          assert tree['sha']==os.environ['SOURCE_TREE'],'Remote tree differs from tested tree'
+          commit=gh('git/commits',{'message':'fix(web-shell): reconcile document budget with upstream changes\n\nAI-assisted merge-conflict maintenance. Full preflight status is recorded separately in the validation run.', 'tree':tree['sha'],'parents':[os.environ['PRODUCT_SHA'],upstream]})
+          print('CANDIDATE_COMMIT='+commit['sha'])
+          print('TESTED_TREE='+tree['sha'])
+          gh('git/refs',{'ref':'refs/heads/'+os.environ['CANDIDATE_BRANCH'],'sha':commit['sha']})
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('sha='+commit['sha']+'\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write('Scoped-tested candidate: `'+commit['sha']+'`\n\nTree: `'+tree['sha']+'`\n\nFull preflight has a separate mandatory result below. Original PR branch is unchanged.\n')
+          PY
+      - name: Run literal full preflight on the preserved candidate tree
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          npm run preflight > "$RUNNER_TEMP/preflight.log" 2>&1 || {
+            python3 - "$RUNNER_TEMP/preflight.log" <<'PY'
+          import pathlib,re,sys
+          lines=re.sub(r'\x1b\[[0-9;]*m','',pathlib.Path(sys.argv[1]).read_text(errors='replace')).splitlines()
+          selected=set(range(max(0,len(lines)-55),len(lines)))
+          for i,l in enumerate(lines):
+              if re.search(r'\bFAIL\s+.*\.test\.|AssertionError|error TS\d+|Failed to|failed to|Error:',l): selected.update(range(max(0,i-2),min(len(lines),i+16)))
+          for i in sorted(selected)[-260:]: print(f'{i+1}: {lines[i]}')
+          PY
+            exit 1
+          }
+          tail -35 "$RUNNER_TEMP/preflight.log"
+      - name: Final source audit
+        if: always()
+        run: |
+          set -euo pipefail
+          git status --short
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
