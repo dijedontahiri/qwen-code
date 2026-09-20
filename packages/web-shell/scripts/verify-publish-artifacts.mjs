@@ -21,7 +21,9 @@ function packedFiles() {
     { cwd: root, encoding: 'utf8' },
   );
   if (result.error) {
-    problems.push(`could not inspect npm pack contents: ${result.error.message}`);
+    problems.push(
+      `could not inspect npm pack contents: ${result.error.message}`,
+    );
     return undefined;
   }
   if (result.status !== 0) {
