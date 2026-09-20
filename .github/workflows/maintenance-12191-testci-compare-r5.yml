@@ -1,0 +1,61 @@
+name: Diagnose PR 12191 repository test stage
+on:
+  push:
+    branches: [validation/12191-testci-compare-r5]
+    paths: [.github/workflows/maintenance-12191-testci-compare-r5.yml]
+permissions:
+  contents: read
+jobs:
+  compare-test-ci:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: baseline
+            source_sha: eceaede18ea5c37404b79974c6d4833c12c23935
+          - arm: product
+            source_sha: 7d7be1d55376aec2f99a167d9238d774e6887005
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ matrix.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify immutable source and install
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ matrix.source_sha }}"
+          node --version
+          corepack pnpm --version
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          git restore --source=HEAD --staged --worktree .
+          test -z "$(git status --short)"
+      - name: Build repository prerequisites
+        run: |
+          set -euo pipefail
+          npm run build
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Run repository test stage with unsuppressed output
+        run: |
+          set -euo pipefail
+          npm run test:ci
+      - name: Audit source after test stage
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ matrix.source_sha }}"
+          git status --short
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
