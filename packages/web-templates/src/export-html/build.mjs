@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import { findUnexpectedImportMeta } from './import-meta-guard.mjs';
 import { TRANSCRIPT_CSS_ENTRY_FILTER } from './transcript-css-entry.mjs';
+import { hasDocumentMcpAppBridgeStubInput } from './document-mcp-stub-guard.mjs';
 
 const assetsDir = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(assetsDir, 'src');
@@ -49,19 +50,13 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // compile before the transcript renders. The CSS is a separate, parallel,
 // year-cached asset and is logged rather than budgeted.
 //
-// Last measured at 1,931,934 bytes of JS with 2,332,167 bytes of CSS moved
-// out, by the Lint & Static lane on main at cc9bb98847 — #12199 and #12050
-// grew only transcript-reachable first-party code (the third-party input mix
-// is unchanged) past the old 1,930,000 cap (#12295), so the budget follows
-// the measurement. Before the split that lane measured the combined bundle at
-// 4,133,282 bytes on main at c3023b3e6d — the measurement #11372 raised these
-// two constants for, and which the CSS extraction superseded because the CSS
-// it counted is no longer in the JS. Keep the warning close to the
-// measurement and the hard ceiling close above it: a cap left far above the
-// measurement is a ratchet with enough slack for a whole dependency family to
-// come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_030_000;
+// Last measured at 1,806,361 bytes of JS on this branch with the MCP Apps
+// document stub engaged. A control with that substitution removed measured
+// 2,111,566 bytes, so keep the warning and hard ceiling close to the healthy
+// measurement; slack large enough for a dependency family to return defeats
+// the ratchet.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 1_830_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -108,6 +103,14 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
       'hooks/useComposerCore.ts; they now live in utils/composerTag.ts, which ' +
       'is editor-free. Import from there, not from the composer hook.',
   },
+  {
+    pattern: /(^|\/)node_modules\/@modelcontextprotocol\/(ext-apps|sdk)\//,
+    why:
+      'A document has no daemon URL, so MCP Apps render their recorded text ' +
+      'without starting an interactive bridge. The app-bridge entry is ' +
+      'resolved to src/document-mcp-app-bridge-stub.ts below; the public ' +
+      'Web Shell package must keep its real MCP dependency external.',
+  },
 ];
 
 // `shiki` and `@shikijs/*` are replaced wholesale rather than marked external:
@@ -117,6 +120,10 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
 const documentShikiStub = join(srcDir, 'document-shiki-stub.ts');
 const documentEchartsStub = join(srcDir, 'document-echarts-stub.ts');
 const documentMermaidStub = join(srcDir, 'document-mermaid-stub.ts');
+const documentMcpAppBridgeStub = join(
+  srcDir,
+  'document-mcp-app-bridge-stub.ts',
+);
 const stripDocumentDeadModules = {
   name: 'strip-document-dead-modules',
   setup(build) {
@@ -129,6 +136,10 @@ const stripDocumentDeadModules = {
     build.onResolve({ filter: /^mermaid(\/|$)/ }, () => ({
       path: documentMermaidStub,
     }));
+    build.onResolve(
+      { filter: /^@modelcontextprotocol\/ext-apps\/app-bridge$/ },
+      () => ({ path: documentMcpAppBridgeStub }),
+    );
   },
 };
 
@@ -145,10 +156,10 @@ const stripDocumentDeadModules = {
 // ~2.3 MB stylesheet. That duplicate would slip past both guards further down:
 // the document nonces every <style> created through document.createElement (the
 // shim in document-index.html), so the CSP admits the injected copy instead of
-// blocking it, and re-adding only the 367-byte injection line keeps the bundle
-// inside DOCUMENT_RUNTIME_WARNING_BYTES and MAX_DOCUMENT_RUNTIME_BYTES. So this
-// throw is the only guard on that path — and the createElement shim is what the
-// shipped renderer's own <style> injection still depends on.
+// blocking it, and re-adding only the 367-byte injection line remains below the
+// document size thresholds. So this throw is the only guard on that path — and
+// the createElement shim is what the shipped renderer's own <style> injection
+// still depends on.
 const extractedTranscriptCss = { css: undefined };
 const extractTranscriptCss = {
   name: 'extract-transcript-css',
@@ -311,6 +322,12 @@ if (!extractedTranscriptCss.css) {
 // below says *how much*; this says *what of*, which is the question a
 // regression actually raises.
 const documentInputs = documentBuildResult.metafile.inputs;
+if (!hasDocumentMcpAppBridgeStubInput(Object.keys(documentInputs))) {
+  throw new Error(
+    'Document export did not engage the MCP Apps document bridge stub; refusing ' +
+      'to publish a transcript renderer whose interactive bridge boundary is unverified.',
+  );
+}
 const inputBytesByPackage = new Map();
 for (const [input, { bytes }] of Object.entries(documentInputs)) {
   const match = input.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//);
