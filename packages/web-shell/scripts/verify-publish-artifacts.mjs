@@ -24,7 +24,11 @@ export function readPackedFileSet(root) {
     shell: !npmExecPath && process.platform === 'win32',
   });
   const packs = JSON.parse(output);
-  if (!Array.isArray(packs) || packs.length !== 1 || !Array.isArray(packs[0]?.files)) {
+  if (
+    !Array.isArray(packs) ||
+    packs.length !== 1 ||
+    !Array.isArray(packs[0]?.files)
+  ) {
     throw new Error('npm pack did not return one package file list');
   }
   return new Set(packs[0].files.map(({ path }) => packedPath(path)));
@@ -78,7 +82,9 @@ export function collectPublishProblems(root, manifest, packedFiles) {
         /(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g,
       )) {
         if (specifier.startsWith('@/')) {
-          problems.push(`dist/types/${name} imports the repo-only ${specifier}`);
+          problems.push(
+            `dist/types/${name} imports the repo-only ${specifier}`,
+          );
         }
       }
     }
@@ -91,7 +97,10 @@ export function verifyPublishArtifacts(root = defaultRoot, manifest = pkg) {
   return collectPublishProblems(root, manifest, packedFiles);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   let problems;
   try {
     problems = verifyPublishArtifacts();
