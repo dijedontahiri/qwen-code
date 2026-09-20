@@ -13,14 +13,15 @@ function normalizePackPath(path) {
 }
 
 function collectPackedFiles(root) {
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const output = execFileSync(
-    npm,
+    'npm',
     ['pack', '--dry-run', '--json', '--ignore-scripts'],
     {
       cwd: root,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      // npm is a .cmd shim on Windows, so it must be resolved by cmd.exe there.
+      shell: process.platform === 'win32',
     },
   );
   const metadata = JSON.parse(output);
