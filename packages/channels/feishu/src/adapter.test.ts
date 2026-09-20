@@ -723,8 +723,52 @@ describe('FeishuChannel', () => {
   });
 
   it('dispatches both media and ordinary text', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'feishu-dispatch-'));
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
     const bridge = createMockBridge();
-    const channel = new FeishuChannel('test', createConfig(), bridge);
+    // Output-card delivery is covered separately; keep this inbound test
+    // focused while exercising the real media download and dispatch path.
+    const channel = new ObservedContactFeishuChannel(
+      'test',
+      createConfig({ cwd: dir }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      tokenCache: { token: 'test_token', expiresAt: Date.now() + 3_600_000 },
+    });
+    const image = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jA5sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const unexpectedRequests: string[] = [];
+    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation((input) => {
+      const url = String(input);
+      if (
+        url.includes('/im/v1/messages/media-image/resources/img_1?type=image')
+      ) {
+        return Promise.resolve(
+          new Response(image, {
+            headers: { 'Content-Type': 'image/png' },
+          }),
+        );
+      }
+      if (url.includes('/contact/v3/users/basic_batch?user_id_type=open_id')) {
+        return Promise.resolve(
+          jsonResponse({
+            code: 0,
+            data: { users: [{ name: 'Test User' }] },
+          }),
+        );
+      }
+      unexpectedRequests.push(url);
+      return Promise.reject(new Error(`Unexpected test request: ${url}`));
+    });
+    const inboundSpy = vi.spyOn(
+      channel as unknown as {
+        handleInbound: (message: unknown) => Promise<void>;
+      },
+      'handleInbound',
+    );
     const onMessage = getPrivateMethod<(data: unknown) => void>(
       channel,
       'onMessage',
@@ -743,12 +787,44 @@ describe('FeishuChannel', () => {
       },
       sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
     });
-
-    onMessage(event('media-image', 'image', { image_key: 'img_1' }));
-    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-
-    onMessage(event('plain-text', 'text', { text: 'inspect this' }));
-    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    try {
+      onMessage(event('media-image', 'image', { image_key: 'img_1' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      expect(inboundSpy).toHaveBeenCalledTimes(1);
+      await inboundSpy.mock.results[0]?.value;
+      expect(inboundSpy.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          attachments: [
+            {
+              type: 'image',
+              data: image.toString('base64'),
+              mimeType: 'image/png',
+            },
+          ],
+        }),
+      );
+      expect(
+        fetchSpy.mock.calls.filter(([input]) =>
+          String(input).includes('/resources/img_1?'),
+        ),
+      ).toHaveLength(1);
+      onMessage(event('plain-text', 'text', { text: 'inspect this' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      expect(inboundSpy).toHaveBeenCalledTimes(2);
+      await inboundSpy.mock.results[1]?.value;
+      expect(unexpectedRequests).toEqual([]);
+    } finally {
+      // Drain inbound work before restoring process-wide mocks so it
+      // cannot issue requests against a later test's fetch fixture.
+      await Promise.allSettled(
+        inboundSpy.mock.results.map((result) => result.value),
+      );
+      channel.disconnect();
+      inboundSpy.mockRestore();
+      fetchSpy.mockRestore();
+      cwdSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('preserves text after platform-normalized mentions with spaced names', async () => {
