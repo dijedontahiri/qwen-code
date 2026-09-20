@@ -49,6 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git checkout "$BASE_SHA" -- packages/web-shell/scripts/verify-publish-artifacts.mjs
           if npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-verifier.test.js 2>&1 | tee /tmp/baseline.log; then
             echo 'baseline verifier unexpectedly passed the candidate regression tests' >&2
