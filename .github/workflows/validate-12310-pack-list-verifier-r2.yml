@@ -1,0 +1,161 @@
+name: Validate issue 12310 pack-list verifier r2
+
+on:
+  push:
+    branches: [validation/12310-pack-list-verifier-r2]
+    paths: [.github/workflows/validate-12310-pack-list-verifier-r2.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CI: 'true'
+      PRODUCT_SHA: 484511a2e2effdd34c32fe1d2cb40f68cc9c4655
+      BASE_SHA: bda4b0743b80a8d07413f03839b34cd5b470e39a
+    steps:
+      - name: Check out immutable product candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 20
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Preflight environment, source and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          corepack --version
+          df -h .
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" "$PRODUCT_SHA"
+          git diff --check "$BASE_SHA" "$PRODUCT_SHA"
+          actual=$(git diff --name-only "$BASE_SHA" "$PRODUCT_SHA" | sort)
+          expected=$(printf '%s\n' \
+            packages/web-shell/scripts/verify-publish-artifacts.mjs \
+            scripts/tests/web-shell-publish-artifacts.test.js | sort)
+          test "$actual" = "$expected"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Prove exact upstream verifier false-passes a packed omission
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/base-pack-fixture"
+          rm -rf "$fixture"
+          mkdir -p "$fixture/scripts" "$fixture/dist/nested"
+          cat > "$fixture/package.json" <<'JSON'
+          {
+            "name": "qwen-pack-baseline-fixture",
+            "version": "1.0.0",
+            "type": "module",
+            "files": ["dist/*.js"],
+            "exports": {".": {"import": "./dist/nested/index.js"}}
+          }
+          JSON
+          printf 'export const value = 1;\n' > "$fixture/dist/nested/index.js"
+          git show "$BASE_SHA:packages/web-shell/scripts/verify-publish-artifacts.mjs" > "$fixture/scripts/verify-publish-artifacts.mjs"
+          (cd "$fixture" && npm pack --dry-run --json --ignore-scripts > "$RUNNER_TEMP/base-pack.json")
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          const metadata = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/base-pack.json', 'utf8'));
+          const files = new Set(metadata[0].files.map((file) => file.path));
+          if (files.has('dist/nested/index.js')) {
+            throw new Error('negative control invalid: npm unexpectedly packed nested export');
+          }
+          console.log('npm omission confirmed');
+          JS
+          set +e
+          node "$fixture/scripts/verify-publish-artifacts.mjs" > "$RUNNER_TEMP/base-verifier.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/base-verifier.log"
+          test "$rc" -eq 0
+          echo 'BASELINE_FALSE_PASS_CONFIRMED=1'
+
+      - name: Install locked dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Run pack-list verifier fixture regressions
+        run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js --retry=0
+
+      - name: Build the documented workspace graph and verify actual package
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+
+      - name: Pack and verify public exports from a symlinked consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/packs" "$RUNNER_TEMP/packed-web" "$RUNNER_TEMP/consumer"
+          mkdir -p "$RUNNER_TEMP/packs" "$RUNNER_TEMP/packed-web" "$RUNNER_TEMP/consumer/node_modules/@qwen-code"
+          npm run prepublishOnly --workspace=@qwen-code/web-shell
+          npm pack --workspace=packages/web-shell --ignore-scripts --pack-destination "$RUNNER_TEMP/packs" > "$RUNNER_TEMP/web-pack-name.txt"
+          web_tgz=$(find "$RUNNER_TEMP/packs" -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)
+          test -n "$web_tgz"
+          tar -xzf "$web_tgz" -C "$RUNNER_TEMP/packed-web"
+          for target in dist/index.js dist/transcript.js dist/daemon-react-sdk.js dist/types/index.d.ts dist/types/transcript.d.ts dist/types/daemon-react-sdk.d.ts; do
+            test -f "$RUNNER_TEMP/packed-web/package/$target"
+          done
+          if grep -R -n -E "['\"]@/" "$RUNNER_TEMP/packed-web/package/dist/types"; then
+            echo 'repository alias leaked into packed declarations' >&2
+            exit 1
+          fi
+          ln -s "$RUNNER_TEMP/packed-web/package" "$RUNNER_TEMP/consumer/node_modules/@qwen-code/web-shell"
+          cd "$RUNNER_TEMP/consumer"
+          node --input-type=module - <<'JS'
+          for (const specifier of [
+            '@qwen-code/web-shell',
+            '@qwen-code/web-shell/transcript',
+            '@qwen-code/web-shell/daemon-react-sdk',
+          ]) {
+            const resolved = import.meta.resolve(specifier);
+            if (!resolved.startsWith('file:')) throw new Error(`unresolved export: ${specifier}`);
+            console.log(specifier, resolved);
+          }
+          JS
+
+      - name: Run changed-area quality checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell
+          node_modules/.bin/prettier --experimental-cli --check \
+            packages/web-shell/scripts/verify-publish-artifacts.mjs \
+            scripts/tests/web-shell-publish-artifacts.test.js
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Run literal repository preflight
+        run: npm run preflight
+
+      - name: Final exact-source audit
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --check "$BASE_SHA" "$PRODUCT_SHA"
