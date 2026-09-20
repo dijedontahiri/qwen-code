@@ -1,0 +1,78 @@
+name: Diagnose issue 12277 pair interactions r1
+
+on:
+  push:
+    branches:
+      - diagnostic/12277-b643-pairs-r1
+    paths:
+      - .github/workflows/diagnose-12277-b643-pairs-r1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      PRODUCT_SHA: b6437572385d29cd24ed5063c2edbdedcbdd965c
+    steps:
+      - name: Checkout immutable product source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Verify exact source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          corepack enable
+      - name: Install locked dependencies without heavy prepare
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: corepack pnpm install --frozen-lockfile
+      - name: Pair lifecycle + ordering
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'serializes lifecycle changes|orders disable after an in-flight enable'
+      - name: Pair lifecycle + target
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'serializes lifecycle changes|validates target before committing listener state'
+      - name: Pair lifecycle + sleep
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'serializes lifecycle changes|reports sleep inhibition only when the inhibitor is running'
+      - name: Pair lifecycle + fallback
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'serializes lifecycle changes|falls back to a free LAN port when the preferred port is in use'
+      - name: Pair ordering + target
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'orders disable after an in-flight enable|validates target before committing listener state'
+      - name: Pair ordering + sleep
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'orders disable after an in-flight enable|reports sleep inhibition only when the inhibitor is running'
+      - name: Pair ordering + fallback
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'orders disable after an in-flight enable|falls back to a free LAN port when the preferred port is in use'
+      - name: Pair target + sleep
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'validates target before committing listener state|reports sleep inhibition only when the inhibitor is running'
+      - name: Pair target + fallback
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'validates target before committing listener state|falls back to a free LAN port when the preferred port is in use'
+      - name: Pair sleep + fallback
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'reports sleep inhibition only when the inhibitor is running|falls back to a free LAN port when the preferred port is in use'
+      - name: Audit immutable product source
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
