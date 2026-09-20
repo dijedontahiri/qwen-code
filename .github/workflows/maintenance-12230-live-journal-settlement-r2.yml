@@ -1,0 +1,173 @@
+name: Validate issue 12230 ordered settlement repair
+on:
+  push:
+    branches: [validation/12230-live-journal-settlement]
+    paths: [.github/workflows/maintenance-12230-live-journal-settlement-r2.yml]
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+      TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QwenLM/qwen-code
+          ref: eceaede18ea5c37404b79974c6d4833c12c23935
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify base and install
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test -z "$(git status --short)"
+          corepack pnpm --version
+          df -h . "$RUNNER_TEMP"
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -100 "$RUNNER_TEMP/install.log"; exit 1; }
+          npm run build
+          git restore --source=HEAD --staged --worktree .
+          test -z "$(git status --short)"
+      - name: Prove desired post-repair baseline assertion fails
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          s=p.read_text()
+          old="    // Current behavior, not desired, pinned deliberately: the replay publish is\n    // gated on local admission and this prompt was never admitted, so the\n    // settlement the live path withheld is never re-published (#12230).\n    expect(settlements).toEqual([]);\n"
+          new="    expect(settlements).toEqual([\n      {\n        sessionId: 'session-settle-repair',\n        promptId: 'prompt-live',\n        outcome: 'completed',\n        stopReason: 'end_turn',\n      },\n    ]);\n"
+          assert s.count(old)==1
+          p.write_text(s.replace(old,new,1))
+          PY
+          set +e
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME") > "$RUNNER_TEMP/baseline.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -F "$TEST_NAME" "$RUNNER_TEMP/baseline.log"
+          grep -F 'expected [] to deeply equal' "$RUNNER_TEMP/baseline.log"
+          git restore --source=HEAD --staged --worktree packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+          test -z "$(git status --short)"
+      - name: Apply minimal repair and ordered regression
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx')
+          s=src.read_text()
+          pairs=[
+            ("  terminalSeen: boolean;\n  attempted: boolean;\n","  terminalSeen: boolean;\n  withheldSettlement?: DaemonPromptSettledEvent;\n  attempted: boolean;\n"),
+            ("                if (settlement && !repairTargetsTerminal) {\n                  publishPromptSettlement(settlement);\n                }\n","                if (settlement) {\n                  if (repairTargetsTerminal && pendingRepair) {\n                    pendingRepair.withheldSettlement = settlement;\n                  } else {\n                    publishPromptSettlement(settlement);\n                  }\n                }\n"),
+            ("              } else if (repairingEpisode) {\n                liveJournalRepairRef.current = undefined;\n              }\n","              } else if (repairingEpisode) {\n                liveJournalRepairRef.current = undefined;\n                if (repairingEpisode.withheldSettlement) {\n                  publishPromptSettlement(repairingEpisode.withheldSettlement);\n                }\n              }\n"),
+          ]
+          for old,new in pairs:
+            assert s.count(old)==1, old[:80]
+            s=s.replace(old,new,1)
+          src.write_text(s)
+
+          p=Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          s=p.read_text()
+          old="    const terminalGate = createDeferred<void>();\n"
+          new="    const terminalGate = createDeferred<void>();\n    const repairGate = createDeferred<void>();\n"
+          assert s.count(old)>=1
+          # Scope to this test by replacing the first terminalGate occurrence after test title.
+          marker="  it('withholds the live settlement while a journal repair targets the same prompt', async () => {"
+          before, rest=s.split(marker,1)
+          assert old in rest
+          rest=rest.replace(old,new,1)
+          s=before+marker+rest
+
+          old="    sdkMocks.sessions.push(initialSession, repairedSession);\n    const settlements: DaemonPromptSettledEvent[] = [];\n"
+          new="""    sdkMocks.MockDaemonSessionClient.load
+      .mockImplementationOnce(async (client: unknown) => {
+        initialSession.client = client as MockClient;
+        return initialSession;
+      })
+      .mockImplementationOnce(async (client: unknown) => {
+        await repairGate.promise;
+        repairedSession.client = client as MockClient;
+        return repairedSession;
+      });
+    const settlements: DaemonPromptSettledEvent[] = [];
+"""
+          assert s.count(old)==1
+          s=s.replace(old,new,1)
+
+          old="""    expect(settlements).toEqual([]);
+    // Positive control: the episode really was armed for this prompt, and the
+    // terminal really did trigger the repair reload rather than being ignored.
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
+      );
+      await flushPromises();
+    });
+    // Current behavior, not desired, pinned deliberately: the replay publish is
+    // gated on local admission and this prompt was never admitted, so the
+    // settlement the live path withheld is never re-published (#12230).
+    expect(settlements).toEqual([]);
+"""
+          new="""    expect(settlements).toEqual([]);
+    // Positive control: the episode really was armed for this prompt and the
+    // terminal started the repair, while publication is still withheld until
+    // the repaired projection is available.
+    await vi.waitFor(() =>
+      expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
+    );
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      repairGate.resolve();
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-repair',
+        promptId: 'prompt-live',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+"""
+          assert s.count(old)==1
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
+          test "$(git diff --name-only | sort)" = "$expected"
+          git diff --check
+          git diff > "$RUNNER_TEMP/candidate.patch"
+      - name: Run focused regression and Web Shell quality gates
+        run: |
+          set -euo pipefail
+          cd packages/web-shell
+          npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME"
+          npm run typecheck
+          npm run lint
+          npm run format:check
+      - name: Run literal repository preflight
+        run: |
+          set -euo pipefail
+          npm run preflight
+      - name: Audit exact patched source
+        if: always()
+        run: |
+          set -euo pipefail
+          git diff --check
+          expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
+          test "$(git diff --name-only | sort)" = "$expected"
+          git diff > "$RUNNER_TEMP/after.patch"
+          cmp "$RUNNER_TEMP/candidate.patch" "$RUNNER_TEMP/after.patch"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
