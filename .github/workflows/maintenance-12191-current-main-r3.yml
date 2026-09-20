@@ -1,0 +1,109 @@
+name: Validate PR 12191 against current main
+on:
+  push:
+    branches: [validation/12191-current-main-r3]
+    paths: [.github/workflows/maintenance-12191-current-main-r3.yml]
+permissions:
+  contents: read
+jobs:
+  exact-candidate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      PRODUCT_SHA: 431e1a84f4f48b24a09f25c7e9e2150b3ba5009d
+      BASE_SHA: f381be770a9abec727b63886a13a9d95f3cfb29d
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 431e1a84f4f48b24a09f25c7e9e2150b3ba5009d
+          fetch-depth: 100
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Verify immutable source and scoped replay
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git fetch --no-tags --depth=100 https://github.com/QwenLM/qwen-code.git "$BASE_SHA"
+          test "$(git merge-base HEAD "$BASE_SHA")" = "$BASE_SHA"
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 1
+          test "$(git diff --name-only "$BASE_SHA" HEAD | wc -l)" -eq 12
+          git diff --name-only "$BASE_SHA" HEAD
+          git diff --quiet "$BASE_SHA" HEAD -- pnpm-lock.yaml package.json packages/web-shell/client/live packages/web-shell/client/components/BranchPickerPopover.tsx packages/web-shell/client/components/BranchPickerPopover.test.tsx
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Install locked prerequisites
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile > "$RUNNER_TEMP/install.log" 2>&1 || { tail -80 "$RUNNER_TEMP/install.log"; exit 1; }
+          git restore --source=HEAD --staged --worktree .
+          git diff --exit-code
+      - name: Effective focused mutation controls
+        run: |
+          set -euo pipefail
+          cp packages/web-shell/build-boundary.ts "$RUNNER_TEMP/build-boundary.ts"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/web-shell/build-boundary.ts')
+          s=p.read_text()
+          old="""  if (id.endsWith('.css')) {\n    return false;\n  }\n"""
+          new="""  if (id === '@xterm/xterm/css/xterm.css' || id === 'katex/dist/katex.min.css') {\n    return false;\n  }\n"""
+          assert old in s
+          p.write_text(s.replace(old,new,1))
+          PY
+          set +e
+          corepack pnpm exec vitest run --config packages/web-shell/vitest.config.ts packages/web-shell/client/build-boundary.test.ts > "$RUNNER_TEMP/css-negative.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -F 'mermaid/dist/mermaid.css' "$RUNNER_TEMP/css-negative.log"
+          cp "$RUNNER_TEMP/build-boundary.ts" packages/web-shell/build-boundary.ts
+          cp packages/web-templates/src/export-html/document-mcp-stub-guard.mjs "$RUNNER_TEMP/mcp-guard.mjs"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/web-templates/src/export-html/document-mcp-stub-guard.mjs')
+          s=p.read_text(); old='  return inputs.some((input) =>\n'; assert old in s
+          p.write_text(s.replace(old,'  return true || inputs.some((input) =>\n',1))
+          PY
+          set +e
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js > "$RUNNER_TEMP/stub-negative.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -F 'rejects a document graph that only reaches the transcript entry' "$RUNNER_TEMP/stub-negative.log"
+          cp "$RUNNER_TEMP/mcp-guard.mjs" packages/web-templates/src/export-html/document-mcp-stub-guard.mjs
+          git diff --exit-code
+      - name: Build exact candidate and run focused regressions
+        run: |
+          set -euo pipefail
+          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -120 "$RUNNER_TEMP/build.log"; exit 1; }
+          grep 'Document export renderer JS' "$RUNNER_TEMP/build.log"
+          npm run test:ci --workspace=@qwen-code/web-shell -- --retry=0 build-boundary.test.ts package-externalization.artifact.test.ts McpApp.document.dom.test.tsx > "$RUNNER_TEMP/focused.log" 2>&1 || { tail -100 "$RUNNER_TEMP/focused.log"; exit 1; }
+          tail -20 "$RUNNER_TEMP/focused.log"
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js scripts/tests/web-terminal-build.test.ts > "$RUNNER_TEMP/scripts.log" 2>&1 || { tail -100 "$RUNNER_TEMP/scripts.log"; exit 1; }
+          tail -20 "$RUNNER_TEMP/scripts.log"
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell > "$RUNNER_TEMP/lint.log" 2>&1 || { tail -80 "$RUNNER_TEMP/lint.log"; exit 1; }
+          git diff --name-only "$BASE_SHA" HEAD -z | xargs -0 node_modules/.bin/prettier --check
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Run literal repository preflight
+        run: |
+          set -euo pipefail
+          npm run preflight > "$RUNNER_TEMP/preflight.log" 2>&1 || { rc=$?; tail -180 "$RUNNER_TEMP/preflight.log"; exit "$rc"; }
+          tail -80 "$RUNNER_TEMP/preflight.log"
+      - name: Audit exact source residue
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git status --short
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
