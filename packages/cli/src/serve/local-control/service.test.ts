@@ -188,11 +188,15 @@ describe('LocalControlService', () => {
     });
     const attached: Server[] = [];
     const detached: Server[] = [];
+    let baselineListeningListeners: number | undefined;
     const service = new LocalControlService({
       app: express(),
       credentials,
       originAllowlist: origins,
-      attachWebSocket: (server) => attached.push(server),
+      attachWebSocket: (server) => {
+        attached.push(server);
+        baselineListeningListeners = server.listenerCount('listening');
+      },
       detachWebSocket: (server) => detached.push(server),
       getPort: () => busyPort,
     });
@@ -204,9 +208,12 @@ describe('LocalControlService', () => {
       expect(status.port).not.toBe(busyPort);
       expect(status.port).toBeGreaterThan(0);
       expect(attached).toHaveLength(1);
-      // Both temporary handlers — including the one from the failed first
-      // bind — must be gone once the fallback listener is running.
-      expect(attached[0].listenerCount('listening')).toBe(0);
+      // Node's HTTP server owns an internal `listening` handler before Local
+      // Control attaches. Assert that both temporary handlers used by our two
+      // bind attempts are gone rather than assuming the server starts at zero.
+      expect(attached[0].listenerCount('listening')).toBe(
+        baselineListeningListeners,
+      );
       expect(attached[0].listenerCount('error')).toBe(1);
 
       const url = new URL(status.url!);
