@@ -69,7 +69,8 @@ jobs:
             cat "$RUNNER_TEMP/css-negative.log"
             exit 1
           fi
-          grep -F 'mermaid/dist/mermaid.css' "$RUNNER_TEMP/css-negative.log" >/dev/null || { tail -100 "$RUNNER_TEMP/css-negative.log"; exit 1; }
+          grep -F 'keeps dependency stylesheet entrypoints bundled' "$RUNNER_TEMP/css-negative.log" >/dev/null || { tail -100 "$RUNNER_TEMP/css-negative.log"; exit 1; }
+          grep -F 'AssertionError: expected true to be false' "$RUNNER_TEMP/css-negative.log" >/dev/null || { tail -100 "$RUNNER_TEMP/css-negative.log"; exit 1; }
           (cd packages/web-shell && corepack pnpm exec vitest run --config vitest.config.ts build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled') > "$RUNNER_TEMP/css-positive.log" 2>&1 || { tail -80 "$RUNNER_TEMP/css-positive.log"; exit 1; }
           grep -E '1 passed|Tests +1 passed' "$RUNNER_TEMP/css-positive.log" >/dev/null || { cat "$RUNNER_TEMP/css-positive.log"; exit 1; }
 
