@@ -57,12 +57,12 @@ jobs:
           p.write_text(s.replace(old,new,1))
           PY
           set +e
-          corepack pnpm exec vitest run --config packages/web-shell/vitest.config.ts packages/web-shell/client/build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled' > "$RUNNER_TEMP/css-negative.log" 2>&1
+          corepack pnpm exec vitest run --config packages/web-shell/vitest.config.ts build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled' > "$RUNNER_TEMP/css-negative.log" 2>&1
           css_rc=$?
           set -e
           cp "$RUNNER_TEMP/build-boundary.ts" packages/web-shell/build-boundary.ts
           test "$css_rc" -ne 0
-          corepack pnpm exec vitest run --config packages/web-shell/vitest.config.ts packages/web-shell/client/build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled' > "$RUNNER_TEMP/css-positive.log" 2>&1 || { tail -80 "$RUNNER_TEMP/css-positive.log"; exit 1; }
+          corepack pnpm exec vitest run --config packages/web-shell/vitest.config.ts build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled' > "$RUNNER_TEMP/css-positive.log" 2>&1 || { tail -80 "$RUNNER_TEMP/css-positive.log"; exit 1; }
 
           cp packages/web-templates/src/export-html/document-mcp-stub-guard.mjs "$RUNNER_TEMP/mcp-guard.mjs"
           python3 - <<'PY'
