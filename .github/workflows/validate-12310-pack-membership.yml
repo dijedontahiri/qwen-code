@@ -37,7 +37,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
-          cache: pnpm
 
       - name: Install locked dependencies
         shell: bash
