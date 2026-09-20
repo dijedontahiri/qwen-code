@@ -1,0 +1,192 @@
+name: Validate PR 12191 current-main reconciliation
+on:
+  push:
+    branches: [validation/12191-current-main-r5]
+    paths: [.github/workflows/maintenance-12191-current-main-r5.yml]
+permissions:
+  contents: read
+jobs:
+  exact-candidate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      PRODUCT_SHA: 7d7be1d55376aec2f99a167d9238d774e6887005
+      BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 7d7be1d55376aec2f99a167d9238d774e6887005
+          fetch-depth: 100
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify immutable source and scoped replay
+        run: |
+          set -euo pipefail
+          node --version
+          corepack pnpm --version
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git fetch --no-tags --depth=100 https://github.com/QwenLM/qwen-code.git "$BASE_SHA"
+          test "$(git merge-base HEAD "$BASE_SHA")" = "$BASE_SHA"
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 1
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA" HEAD)
+          test "${#changed[@]}" -eq 11
+          printf '%s\n' "${changed[@]}"
+          expected=(
+            '.qwen/e2e-tests/2026-09-18-web-shell-package-artifacts.md'
+            'packages/web-shell/build-boundary.ts'
+            'packages/web-shell/client/build-boundary.test.ts'
+            'packages/web-shell/client/components/messages/McpApp.document.dom.test.tsx'
+            'packages/web-shell/client/package-externalization.artifact.test.ts'
+            'packages/web-shell/vite.lib.config.ts'
+            'packages/web-templates/src/export-html/build.mjs'
+            'packages/web-templates/src/export-html/document-mcp-stub-guard.mjs'
+            'packages/web-templates/src/export-html/src/document-mcp-app-bridge-stub.ts'
+            'scripts/tests/document-mcp-stub-guard.test.js'
+            'scripts/tests/web-terminal-build.test.ts'
+          )
+          printf '%s\n' "${expected[@]}" | sort > "$RUNNER_TEMP/expected.txt"
+          printf '%s\n' "${changed[@]}" | sort > "$RUNNER_TEMP/actual.txt"
+          diff -u "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/actual.txt"
+          git diff --quiet "$BASE_SHA" HEAD -- pnpm-lock.yaml package.json packages/web-shell/vite.config.ts packages/web-shell/client/live packages/web-shell/client/components/BranchPickerPopover.tsx packages/web-shell/client/components/BranchPickerPopover.test.tsx
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Install locked prerequisites
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -100 "$RUNNER_TEMP/install.log"; exit 1; }
+          git restore --source=HEAD --staged --worktree .
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Effective focused mutation controls
+        run: |
+          set -euo pipefail
+          cp packages/web-shell/build-boundary.ts "$RUNNER_TEMP/build-boundary.ts"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/web-shell/build-boundary.ts')
+          s=p.read_text()
+          old="""  if (id.endsWith('.css')) {\n    return false;\n  }\n"""
+          new="""  if (id === '@xterm/xterm/css/xterm.css' || id === 'katex/dist/katex.min.css') {\n    return false;\n  }\n"""
+          assert old in s
+          p.write_text(s.replace(old,new,1))
+          PY
+          set +e
+          (cd packages/web-shell && corepack pnpm exec vitest run --config vitest.config.ts build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled') > "$RUNNER_TEMP/css-negative.log" 2>&1
+          css_rc=$?
+          set -e
+          cp "$RUNNER_TEMP/build-boundary.ts" packages/web-shell/build-boundary.ts
+          test "$css_rc" -ne 0
+          (cd packages/web-shell && corepack pnpm exec vitest run --config vitest.config.ts build-boundary.test.ts -t 'keeps dependency stylesheet entrypoints bundled') > "$RUNNER_TEMP/css-positive.log" 2>&1 || { tail -100 "$RUNNER_TEMP/css-positive.log"; exit 1; }
+
+          cp packages/web-templates/src/export-html/document-mcp-stub-guard.mjs "$RUNNER_TEMP/mcp-guard.mjs"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/web-templates/src/export-html/document-mcp-stub-guard.mjs')
+          s=p.read_text(); old='  return inputs.some((input) =>\n'; assert old in s
+          p.write_text(s.replace(old,'  return true || inputs.some((input) =>\n',1))
+          PY
+          set +e
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js -t 'rejects a document graph that only reaches the transcript entry' > "$RUNNER_TEMP/stub-negative.log" 2>&1
+          stub_rc=$?
+          set -e
+          cp "$RUNNER_TEMP/mcp-guard.mjs" packages/web-templates/src/export-html/document-mcp-stub-guard.mjs
+          test "$stub_rc" -ne 0
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js -t 'rejects a document graph that only reaches the transcript entry' > "$RUNNER_TEMP/stub-positive.log" 2>&1 || { tail -100 "$RUNNER_TEMP/stub-positive.log"; exit 1; }
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Build exact candidate and run focused regressions
+        run: |
+          set -euo pipefail
+          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -150 "$RUNNER_TEMP/build.log"; exit 1; }
+          grep 'Document export renderer JS' "$RUNNER_TEMP/build.log"
+          (cd packages/web-shell && npm run test:ci -- --retry=0 build-boundary.test.ts package-externalization.artifact.test.ts McpApp.document.dom.test.tsx) > "$RUNNER_TEMP/focused.log" 2>&1 || { tail -120 "$RUNNER_TEMP/focused.log"; exit 1; }
+          tail -30 "$RUNNER_TEMP/focused.log"
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js scripts/tests/web-terminal-build.test.ts > "$RUNNER_TEMP/scripts.log" 2>&1 || { tail -120 "$RUNNER_TEMP/scripts.log"; exit 1; }
+          tail -30 "$RUNNER_TEMP/scripts.log"
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell > "$RUNNER_TEMP/lint.log" 2>&1 || { tail -100 "$RUNNER_TEMP/lint.log"; exit 1; }
+          git diff --name-only "$BASE_SHA" HEAD -z | xargs -0 node_modules/.bin/prettier --check
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Verify real packed consumer exports, types, and symlink resolution
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/packs" "$RUNNER_TEMP/consumer" "$RUNNER_TEMP/symlink-consumer/node_modules/@qwen-code"
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+          (cd packages/web-shell && npm pack --dry-run --json --ignore-scripts > "$RUNNER_TEMP/web-shell-dry-run.json")
+          (cd packages/sdk-typescript && npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/packs" >/dev/null)
+          (cd packages/web-shell && npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/packs" >/dev/null)
+          sdk_tgz="$(find "$RUNNER_TEMP/packs" -maxdepth 1 -name 'qwen-code-sdk-*.tgz' -print -quit)"
+          shell_tgz="$(find "$RUNNER_TEMP/packs" -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)"
+          test -n "$sdk_tgz" && test -f "$sdk_tgz"
+          test -n "$shell_tgz" && test -f "$shell_tgz"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm pkg set type=module >/dev/null
+          npm install --ignore-scripts --no-audit --no-fund "$sdk_tgz" "$shell_tgz" react@19.2.0 react-dom@19.2.0 @types/react@19 @types/react-dom@19 typescript@5.9 >/dev/null
+          cat > resolve.mjs <<'JS'
+          import { existsSync } from 'node:fs';
+          import { fileURLToPath } from 'node:url';
+          const specs = [
+            '@qwen-code/web-shell',
+            '@qwen-code/web-shell/daemon-react-sdk',
+            '@qwen-code/web-shell/transcript',
+          ];
+          for (const spec of specs) {
+            const resolved = import.meta.resolve(spec);
+            if (!existsSync(fileURLToPath(resolved))) throw new Error(`missing packed export ${spec}: ${resolved}`);
+            console.log(`${spec} -> ${resolved}`);
+          }
+          JS
+          node resolve.mjs
+          cat > consumer.tsx <<'TS'
+          import type { ComponentType } from 'react';
+          import * as WebShell from '@qwen-code/web-shell';
+          import * as DaemonSdk from '@qwen-code/web-shell/daemon-react-sdk';
+          import * as Transcript from '@qwen-code/web-shell/transcript';
+          const values: unknown[] = [WebShell, DaemonSdk, Transcript];
+          const maybeComponent: ComponentType | undefined = undefined;
+          void values; void maybeComponent;
+          TS
+          ./node_modules/.bin/tsc --noEmit --target ES2021 --module ESNext --moduleResolution Bundler --jsx react-jsx --skipLibCheck false consumer.tsx
+          ln -s "$RUNNER_TEMP/consumer/node_modules/@qwen-code/web-shell" "$RUNNER_TEMP/symlink-consumer/node_modules/@qwen-code/web-shell"
+          ln -s "$RUNNER_TEMP/consumer/node_modules/@qwen-code/sdk" "$RUNNER_TEMP/symlink-consumer/node_modules/@qwen-code/sdk"
+          cp resolve.mjs "$RUNNER_TEMP/symlink-consumer/resolve.mjs"
+          (cd "$RUNNER_TEMP/symlink-consumer" && node resolve.mjs)
+          cd "$GITHUB_WORKSPACE"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Run real transcript document browser gate
+        run: |
+          set -euo pipefail
+          node node_modules/playwright/cli.js install --with-deps chromium > "$RUNNER_TEMP/playwright-install.log" 2>&1 || { tail -100 "$RUNNER_TEMP/playwright-install.log"; exit 1; }
+          npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0 > "$RUNNER_TEMP/document-browser.log" 2>&1 || { tail -140 "$RUNNER_TEMP/document-browser.log"; exit 1; }
+          tail -40 "$RUNNER_TEMP/document-browser.log"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Run literal repository preflight
+        run: |
+          set -euo pipefail
+          npm run preflight > "$RUNNER_TEMP/preflight.log" 2>&1 || { rc=$?; tail -200 "$RUNNER_TEMP/preflight.log"; exit "$rc"; }
+          tail -100 "$RUNNER_TEMP/preflight.log"
+      - name: Audit exact source residue
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git status --short
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
