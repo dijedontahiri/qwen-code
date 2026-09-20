@@ -1,0 +1,330 @@
+name: Prepare issue 11997 tag padding r1
+
+on:
+  push:
+    branches:
+      - worker/11997-tag-padding-r1
+    paths:
+      - .github/workflows/worker-11997-tag-padding-r1.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CI: 'true'
+      BASE_SHA: 3e9576120896e7568181942b6bf94c57b61ca277
+      TARGET_BRANCH: candidate/11997-tag-padding-r1
+    steps:
+      - name: Checkout immutable base
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+
+      - name: Preflight environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          node --version
+          npm --version
+          df -h .
+          test -z "$(git status --porcelain)"
+
+      - name: Apply minimal product and browser regression patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          chat_css = Path('packages/web-shell/client/components/ChatEditor.module.css')
+          text = chat_css.read_text()
+          old = '''.tagContent {
+            display: inline-flex;
+            min-width: 0;
+            max-width: 100%;
+            flex: 1 1 auto;
+            align-items: center;
+          }
+
+          .tagTooltip {'''
+          new = '''.tagContent {
+            display: inline-flex;
+            min-width: 0;
+            max-width: 100%;
+            flex: 1 1 auto;
+            align-items: center;
+          }
+
+          .tagContent:last-child {
+            padding-right: 7px;
+          }
+
+          .tagTooltip {'''
+          if text.count(old) != 1:
+              raise SystemExit('ChatEditor tagContent anchor changed')
+          chat_css.write_text(text.replace(old, new))
+
+          user_css = Path('packages/web-shell/client/components/messages/UserMessage.module.css')
+          text = user_css.read_text()
+          old = '''  align-items: center;
+            margin: 0 0.25ch;
+            border: 1px solid var(--border);'''
+          new = '''  align-items: center;
+            margin: 0 0.25ch;
+            padding-right: 7px;
+            border: 1px solid var(--border);'''
+          if text.count(old) != 1:
+              raise SystemExit('UserMessage messageTag anchor changed')
+          user_css.write_text(text.replace(old, new))
+
+          harness = Path('packages/web-shell/client/e2e/composer-layout-harness.tsx')
+          text = harness.read_text()
+          old = "import '../styles/standalone.css';\n"
+          new = "import '../styles/standalone.css';\nimport { ReadonlyComposerTag } from '../components/messages/UserMessage';\n"
+          if text.count(old) != 1:
+              raise SystemExit('harness import anchor changed')
+          text = text.replace(old, new)
+          old = "const sessionId = params.get('sessionId') ?? 'composer-layout-e2e';\nconst tags = Array.from({ length: 18 }, (_, index) => ({\n  id: `table-${index + 1}`,\n  label: 'Table',\n  value: `analytics_table_${index + 1}`,\n}));\n"
+          new = "const sessionId = params.get('sessionId') ?? 'composer-layout-e2e';\nconst tagPaddingProbe = params.get('tagPaddingProbe') === 'true';\nconst paddingProbeTag = {\n  id: 'padding-probe',\n  label: '任务管理',\n  serialized: '/some-skill',\n  removable: false,\n};\nconst tags = tagPaddingProbe\n  ? [\n      paddingProbeTag,\n      {\n        id: 'padding-control',\n        label: 'Table',\n        value: 'analytics_table',\n        serialized: 'analytics_table',\n      },\n    ]\n  : Array.from({ length: 18 }, (_, index) => ({\n      id: `table-${index + 1}`,\n      label: 'Table',\n      value: `analytics_table_${index + 1}`,\n    }));\n"
+          if text.count(old) != 1:
+              raise SystemExit('harness tags anchor changed')
+          text = text.replace(old, new)
+          old = '''    <WebShellWithProviders
+              baseUrl={window.location.origin}
+              sidebar={false}
+              composerInput={{ tags, tagPlacement: 'top' }}
+              composerInputVersion={1}
+              renderComposerTagTooltip={({ tag }) => `Details for ${tag.value}`}
+              {...sessionProps}
+            />
+          </React.StrictMode>,'''
+          new = '''    <WebShellWithProviders
+              baseUrl={window.location.origin}
+              sidebar={false}
+              composerInput={{ tags, tagPlacement: 'top' }}
+              composerInputVersion={1}
+              renderComposerTagTooltip={({ tag }) => `Details for ${tag.value}`}
+              {...sessionProps}
+            />
+            {tagPaddingProbe ? (
+              <div data-e2e-readonly-padding-probe>
+                <ReadonlyComposerTag
+                  tag={paddingProbeTag}
+                  composerTagIcons={undefined}
+                  renderComposerTag={undefined}
+                  renderComposerTagTooltip={({ tag }) => `Details for ${tag.label}`}
+                  onComposerTagClick={undefined}
+                />
+              </div>
+            ) : null}
+          </React.StrictMode>,'''
+          if text.count(old) != 1:
+              raise SystemExit('harness render anchor changed')
+          harness.write_text(text.replace(old, new))
+          PY
+
+          cat > packages/web-shell/client/e2e/web-shell.tag-padding.spec.ts <<'EOF'
+          import { expect, test, type Page } from '@playwright/test';
+          import {
+            createWebShellDaemonScenario,
+            installMockDaemon,
+            replayCompleteEvent,
+            type MockDaemonController,
+            type WebShellDaemonScenario,
+          } from './utils/mockDaemon';
+
+          test('keeps label-only non-removable tags inset on both rendered surfaces @smoke', async ({
+            page,
+          }, testInfo) => {
+            const scenario = createWebShellDaemonScenario({
+              sessionId: 'composer-layout-e2e',
+            });
+            const daemon = await installMockDaemon(page, scenario, {
+              baseURL: String(testInfo.project.use.baseURL),
+            });
+            await gotoPaddingHarness(page, scenario, daemon);
+
+            const composerProbe = page
+              .locator('[data-web-shell-composer-tag]')
+              .filter({ hasText: '任务管理' });
+            await expect(composerProbe).toHaveCount(1);
+            await expect(composerProbe.locator('button')).toHaveCount(0);
+            const composerTrigger = composerProbe.locator(
+              '[data-web-shell-composer-tag-trigger]',
+            );
+            await expect(composerTrigger).toHaveCSS('padding-right', '7px');
+            await expect
+              .poll(async () => {
+                const [outer, content] = await Promise.all([
+                  composerProbe.boundingBox(),
+                  composerTrigger.boundingBox(),
+                ]);
+                if (!outer || !content) return 0;
+                return outer.x + outer.width - (content.x + content.width);
+              })
+              .toBeGreaterThanOrEqual(7);
+
+            const removableControl = page
+              .locator('[data-web-shell-composer-tag]')
+              .filter({ hasText: 'analytics_table' });
+            await expect(removableControl.getByRole('button')).toHaveCount(1);
+            await expect(
+              removableControl.locator('[data-web-shell-composer-tag-trigger]'),
+            ).toHaveCSS('padding-right', '0px');
+
+            const readonlyProbe = page
+              .locator('[data-e2e-readonly-padding-probe]')
+              .locator('span[title="任务管理"]');
+            await expect(readonlyProbe).toHaveCount(1);
+            await expect(readonlyProbe).toHaveCSS('padding-right', '7px');
+            const readonlyLabel = readonlyProbe.getByText('任务管理', {
+              exact: true,
+            });
+            await expect
+              .poll(async () => {
+                const [outer, label] = await Promise.all([
+                  readonlyProbe.boundingBox(),
+                  readonlyLabel.boundingBox(),
+                ]);
+                if (!outer || !label) return 0;
+                return outer.x + outer.width - (label.x + label.width);
+              })
+              .toBeGreaterThanOrEqual(7);
+
+            await composerProbe.screenshot({
+              path: testInfo.outputPath('composer-label-only-tag.png'),
+            });
+            await readonlyProbe.screenshot({
+              path: testInfo.outputPath('readonly-label-only-tag.png'),
+            });
+          });
+
+          async function gotoPaddingHarness(
+            page: Page,
+            scenario: WebShellDaemonScenario,
+            daemon: MockDaemonController,
+          ): Promise<void> {
+            await page.goto(
+              `/e2e/composer-layout-harness.html?sessionId=${encodeURIComponent(scenario.sessionId)}&tagPaddingProbe=true`,
+            );
+            await expect(
+              page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+            ).toBeVisible();
+            const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+            await daemon.sendEvent(
+              replayCompleteEvent({
+                sessionId: connection.sessionId,
+                replayedCount: scenario.events.length,
+              }),
+            );
+            await expect(page.getByText('Loading...')).toHaveCount(0);
+          }
+          EOF
+
+          expected=$(printf '%s\n' \
+            packages/web-shell/client/components/ChatEditor.module.css \
+            packages/web-shell/client/components/messages/UserMessage.module.css \
+            packages/web-shell/client/e2e/composer-layout-harness.tsx \
+            packages/web-shell/client/e2e/web-shell.tag-padding.spec.ts | sort)
+          actual=$(git status --porcelain | sed 's/^...//' | sort)
+          test "$actual" = "$expected"
+          git diff --check
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium runtime
+        run: npx playwright install --with-deps chromium
+
+      - name: Prove baseline browser regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp packages/web-shell/client/components/ChatEditor.module.css /tmp/ChatEditor.module.css.candidate
+          cp packages/web-shell/client/components/messages/UserMessage.module.css /tmp/UserMessage.module.css.candidate
+          git checkout "$BASE_SHA" -- \
+            packages/web-shell/client/components/ChatEditor.module.css \
+            packages/web-shell/client/components/messages/UserMessage.module.css
+          set +e
+          npm exec --workspace=packages/web-shell -- playwright test --config playwright.config.ts client/e2e/web-shell.tag-padding.spec.ts --project=chromium --retries=0 2>&1 | tee /tmp/11997-baseline.log
+          status=${PIPESTATUS[0]}
+          set -e
+          cp /tmp/ChatEditor.module.css.candidate packages/web-shell/client/components/ChatEditor.module.css
+          cp /tmp/UserMessage.module.css.candidate packages/web-shell/client/components/messages/UserMessage.module.css
+          test "$status" -ne 0
+          grep -Fq 'padding-right' /tmp/11997-baseline.log
+
+      - name: Run candidate browser regression
+        run: npm exec --workspace=packages/web-shell -- playwright test --config playwright.config.ts client/e2e/web-shell.tag-padding.spec.ts --project=chromium --retries=0
+
+      - name: Check focused formatting and lint
+        run: |
+          npx prettier --experimental-cli --check \
+            packages/web-shell/client/components/ChatEditor.module.css \
+            packages/web-shell/client/components/messages/UserMessage.module.css \
+            packages/web-shell/client/e2e/composer-layout-harness.tsx \
+            packages/web-shell/client/e2e/web-shell.tag-padding.spec.ts
+          npx eslint \
+            packages/web-shell/client/e2e/composer-layout-harness.tsx \
+            packages/web-shell/client/e2e/web-shell.tag-padding.spec.ts \
+            --max-warnings 0
+
+      - name: Run Web Shell typecheck and build
+        run: |
+          npm run typecheck --workspace=packages/web-shell
+          npm run build --workspace=packages/web-shell
+
+      - name: Run literal repository preflight
+        run: npm run preflight
+
+      - name: Verify final product scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf packages/web-shell/client/e2e/test-results packages/web-shell/client/e2e/playwright-report
+          expected=$(printf '%s\n' \
+            packages/web-shell/client/components/ChatEditor.module.css \
+            packages/web-shell/client/components/messages/UserMessage.module.css \
+            packages/web-shell/client/e2e/composer-layout-harness.tsx \
+            packages/web-shell/client/e2e/web-shell.tag-padding.spec.ts | sort)
+          actual=$(git status --porcelain | sed 's/^...//' | sort)
+          test "$actual" = "$expected"
+          git diff --check
+
+      - name: Commit verified product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Dijedon'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          git add \
+            packages/web-shell/client/components/ChatEditor.module.css \
+            packages/web-shell/client/components/messages/UserMessage.module.css \
+            packages/web-shell/client/e2e/composer-layout-harness.tsx \
+            packages/web-shell/client/e2e/web-shell.tag-padding.spec.ts
+          git commit -m 'fix(web-shell): restore tag right padding'
+          git diff --check "$BASE_SHA" HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Push verified candidate branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          remote_sha=$(git ls-remote origin "refs/heads/$TARGET_BRANCH" | awk '{print $1}')
+          test "$remote_sha" = "$BASE_SHA"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/dijedontahiri/qwen-code.git" HEAD:"refs/heads/$TARGET_BRANCH"
