@@ -136,6 +136,7 @@ describe('web-shell publish artifact verifier', () => {
       write(fixture, 'dist/src/example.js', 'export default 1;\n');
     });
 
+    expect(result.stderr).not.toContain('missing ./dist/src/*');
     expect(result.status).toBe(0);
     expect(result.stderr).toBe('');
   });
