@@ -1,0 +1,146 @@
+name: Validate issue 12230 settlement repair
+on:
+  push:
+    branches: [validation/12230-live-repair-settlement]
+    paths: [.github/workflows/maintenance-12230-live-repair-settlement.yml]
+permissions:
+  contents: read
+jobs:
+  focused-candidate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    env:
+      BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+      TARGET_TEST: withholds the live settlement while a journal repair targets the same prompt
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: eceaede18ea5c37404b79974c6d4833c12c23935
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify immutable baseline and environment
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          node --version
+          test "$(corepack pnpm --version)" = '11.24.0'
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Install locked dependencies and build workspace dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -120 "$RUNNER_TEMP/install.log"; exit 1; }
+          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -160 "$RUNNER_TEMP/build.log"; exit 1; }
+          git restore --source=HEAD --staged --worktree .
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Prove intended baseline settlement assertion fails
+        run: |
+          set -euo pipefail
+          cp packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx "$RUNNER_TEMP/provider.test.tsx"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          s = p.read_text()
+          old = """    // Current behavior, not desired, pinned deliberately: the replay publish is\n    // gated on local admission and this prompt was never admitted, so the\n    // settlement the live path withheld is never re-published (#12230).\n    expect(settlements).toEqual([]);\n"""
+          new = """    // A settlement withheld for repair must be published after the repaired\n    // transcript has been applied, even when this client never admitted it.\n    expect(settlements).toEqual([\n      {\n        sessionId: 'session-settle-repair',\n        promptId: 'prompt-live',\n        outcome: 'completed',\n        stopReason: 'end_turn',\n      },\n    ]);\n"""
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new, 1))
+          PY
+          set +e
+          (cd packages/web-shell && NO_COLOR=1 npm run test:ci -- --retry=0 daemon/session/DaemonSessionProvider.test.tsx -t "$TARGET_TEST") > "$RUNNER_TEMP/baseline.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/baseline.log"
+          test "$rc" -ne 0
+          grep -F "$TARGET_TEST" "$RUNNER_TEMP/baseline.log"
+          grep -E '1 failed|failed' "$RUNNER_TEMP/baseline.log"
+          cp "$RUNNER_TEMP/provider.test.tsx" packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Apply minimal candidate repair
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx')
+          s = p.read_text()
+          old = """  terminalSeen: boolean;\n  attempted: boolean;\n"""
+          new = """  terminalSeen: boolean;\n  withheldSettlement?: DaemonPromptSettledEvent;\n  attempted: boolean;\n"""
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+
+          old = """                if (settlement && !repairTargetsTerminal) {\n                  publishPromptSettlement(settlement);\n                }\n"""
+          new = """                if (settlement && !repairTargetsTerminal) {\n                  publishPromptSettlement(settlement);\n                } else if (\n                  settlement &&\n                  repairTargetsTerminal &&\n                  pendingRepair\n                ) {\n                  pendingRepair.withheldSettlement = settlement;\n                }\n"""
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+
+          old = """              } else if (repairingEpisode) {\n                liveJournalRepairRef.current = undefined;\n              }\n"""
+          new = """              } else if (repairingEpisode) {\n                const withheldSettlement = repairingEpisode.withheldSettlement;\n                liveJournalRepairRef.current = undefined;\n                if (withheldSettlement) {\n                  publishPromptSettlement(withheldSettlement);\n                }\n              }\n"""
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          s = p.read_text()
+          old = """    // Current behavior, not desired, pinned deliberately: the replay publish is\n    // gated on local admission and this prompt was never admitted, so the\n    // settlement the live path withheld is never re-published (#12230).\n    expect(settlements).toEqual([]);\n"""
+          new = """    // A settlement withheld for repair is published once after the repaired\n    // transcript is applied, without routing ordinary replay through the local\n    // admission gate.\n    expect(settlements).toEqual([\n      {\n        sessionId: 'session-settle-repair',\n        promptId: 'prompt-live',\n        outcome: 'completed',\n        stopReason: 'end_turn',\n      },\n    ]);\n"""
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+          git diff -- packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+      - name: Run candidate focused and file regressions
+        run: |
+          set -euo pipefail
+          (cd packages/web-shell && NO_COLOR=1 npm run test:ci -- --retry=0 daemon/session/DaemonSessionProvider.test.tsx -t "$TARGET_TEST") | tee "$RUNNER_TEMP/candidate-focused.log"
+          grep -F "$TARGET_TEST" "$RUNNER_TEMP/candidate-focused.log"
+          (cd packages/web-shell && NO_COLOR=1 npm run test:ci -- --retry=0 daemon/session/DaemonSessionProvider.test.tsx) | tee "$RUNNER_TEMP/candidate-file.log"
+          grep -E '[0-9]+ passed' "$RUNNER_TEMP/candidate-file.log"
+      - name: Run candidate Web Shell quality gates
+        run: |
+          set -euo pipefail
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell > "$RUNNER_TEMP/lint.log" 2>&1 || { tail -120 "$RUNNER_TEMP/lint.log"; exit 1; }
+          printf '%s\0' \
+            packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx \
+            packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx \
+            | xargs -0 node_modules/.bin/prettier --check
+          git diff --check
+          git diff --name-only "$BASE_SHA" -- | sort | tee "$RUNNER_TEMP/changed.txt"
+          test "$(wc -l < "$RUNNER_TEMP/changed.txt")" -eq 2
+          grep -Fx 'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx' "$RUNNER_TEMP/changed.txt"
+          grep -Fx 'packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx' "$RUNNER_TEMP/changed.txt"
+      - name: Capture candidate files
+        run: |
+          set -euo pipefail
+          git diff --binary "$BASE_SHA" -- \
+            packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx \
+            packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx \
+            > "$RUNNER_TEMP/candidate.diff"
+          test -s "$RUNNER_TEMP/candidate.diff"
+      - name: Upload candidate files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-12230-candidate-files
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx
+            packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+            ${{ runner.temp }}/candidate.diff
+      - name: Report candidate diff state
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          git status --short
+          git diff --check || true
