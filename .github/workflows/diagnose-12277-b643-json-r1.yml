@@ -1,0 +1,76 @@
+name: Diagnose issue 12277 full-suite JSON r1
+
+on:
+  push:
+    branches:
+      - diagnostic/12277-b643-json-r1
+    paths:
+      - .github/workflows/diagnose-12277-b643-json-r1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      PRODUCT_SHA: b6437572385d29cd24ed5063c2edbdedcbdd965c
+    steps:
+      - name: Checkout immutable product source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Verify exact source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          corepack enable
+      - name: Install locked dependencies without heavy prepare
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: corepack pnpm install --frozen-lockfile
+      - id: full
+        name: Run full focused file with JSON reporter
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts --reporter=json --outputFile=/tmp/12277.json
+      - name: JSON says lifecycle assertion failed
+        continue-on-error: true
+        run: node -e "const d=require('/tmp/12277.json'); const a=d.testResults.flatMap(r=>r.assertionResults||[]); const r=a.find(x=>(x.fullName||x.title||'').includes('serializes lifecycle changes')); process.exit(r?.status==='failed'?0:1)"
+      - name: JSON says ordering assertion failed
+        continue-on-error: true
+        run: node -e "const d=require('/tmp/12277.json'); const a=d.testResults.flatMap(r=>r.assertionResults||[]); const r=a.find(x=>(x.fullName||x.title||'').includes('orders disable after an in-flight enable')); process.exit(r?.status==='failed'?0:1)"
+      - name: JSON says target assertion failed
+        continue-on-error: true
+        run: node -e "const d=require('/tmp/12277.json'); const a=d.testResults.flatMap(r=>r.assertionResults||[]); const r=a.find(x=>(x.fullName||x.title||'').includes('validates target before committing listener state')); process.exit(r?.status==='failed'?0:1)"
+      - name: JSON says sleep assertion failed
+        continue-on-error: true
+        run: node -e "const d=require('/tmp/12277.json'); const a=d.testResults.flatMap(r=>r.assertionResults||[]); const r=a.find(x=>(x.fullName||x.title||'').includes('reports sleep inhibition only when the inhibitor is running')); process.exit(r?.status==='failed'?0:1)"
+      - name: JSON says fallback assertion failed
+        continue-on-error: true
+        run: node -e "const d=require('/tmp/12277.json'); const a=d.testResults.flatMap(r=>r.assertionResults||[]); const r=a.find(x=>(x.fullName||x.title||'').includes('falls back to a free LAN port when the preferred port is in use')); process.exit(r?.status==='failed'?0:1)"
+      - name: JSON says all five assertions passed
+        continue-on-error: true
+        run: node -e "const d=require('/tmp/12277.json'); const a=d.testResults.flatMap(r=>r.assertionResults||[]).filter(x=>(x.fullName||x.title||'').includes('LocalControlService')); process.exit(a.length===5 && a.every(x=>x.status==='passed')?0:1)"
+      - name: JSON reports test-file failure message
+        continue-on-error: true
+        run: node -e "const d=require('/tmp/12277.json'); const r=d.testResults.find(r=>String(r.name||'').includes('service.test.ts')); process.exit((r?.message||r?.failureMessage||'').length>0?0:1)"
+      - name: Audit immutable product source
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
