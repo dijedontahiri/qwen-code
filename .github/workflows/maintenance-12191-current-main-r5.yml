@@ -118,7 +118,7 @@ jobs:
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
-      - name: Verify real packed consumer exports, types, and symlink resolution
+      - name: Verify packed consumer exports and isolate unchanged SDK type blocker
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/packs" "$RUNNER_TEMP/consumer" "$RUNNER_TEMP/symlink-consumer/node_modules/@qwen-code"
@@ -130,6 +130,7 @@ jobs:
           shell_tgz="$(find "$RUNNER_TEMP/packs" -maxdepth 1 -name 'qwen-code-web-shell-*.tgz' -print -quit)"
           test -n "$sdk_tgz" && test -f "$sdk_tgz"
           test -n "$shell_tgz" && test -f "$shell_tgz"
+          git diff --quiet "$BASE_SHA" HEAD -- packages/sdk-typescript packages/acp-bridge pnpm-lock.yaml package.json
           cd "$RUNNER_TEMP/consumer"
           npm init -y >/dev/null
           npm pkg set type=module >/dev/null
@@ -149,6 +150,17 @@ jobs:
           }
           JS
           node resolve.mjs
+          cat > sdk-only.ts <<'TS'
+          import * as SdkDaemon from '@qwen-code/sdk/daemon';
+          void SdkDaemon;
+          TS
+          set +e
+          ./node_modules/.bin/tsc --noEmit --target ES2021 --module ESNext --moduleResolution Bundler --skipLibCheck false sdk-only.ts > "$RUNNER_TEMP/sdk-only-strict.log" 2>&1
+          sdk_rc=$?
+          set -e
+          test "$sdk_rc" -ne 0 || { echo 'expected unchanged packed SDK strict typecheck to expose its known dependency declaration blocker'; exit 1; }
+          grep -F "node_modules/@qwen-code/sdk/dist/daemon/events.d.ts" "$RUNNER_TEMP/sdk-only-strict.log"
+          grep -F "Cannot find module '@qwen-code/acp-bridge/daemonEventTypes'" "$RUNNER_TEMP/sdk-only-strict.log"
           cat > consumer.tsx <<'TS'
           import type { ComponentType } from 'react';
           import * as WebShell from '@qwen-code/web-shell';
@@ -158,7 +170,14 @@ jobs:
           const maybeComponent: ComponentType | undefined = undefined;
           void values; void maybeComponent;
           TS
-          ./node_modules/.bin/tsc --noEmit --target ES2021 --module ESNext --moduleResolution Bundler --jsx react-jsx --skipLibCheck false consumer.tsx
+          set +e
+          ./node_modules/.bin/tsc --noEmit --target ES2021 --module ESNext --moduleResolution Bundler --jsx react-jsx --skipLibCheck false consumer.tsx > "$RUNNER_TEMP/web-shell-strict.log" 2>&1
+          shell_strict_rc=$?
+          set -e
+          test "$shell_strict_rc" -ne 0 || { echo 'expected strict packed Web Shell consumer to encounter the same unchanged SDK declaration blocker'; exit 1; }
+          grep -F "node_modules/@qwen-code/sdk/dist/daemon/events.d.ts" "$RUNNER_TEMP/web-shell-strict.log"
+          grep -F "Cannot find module '@qwen-code/acp-bridge/daemonEventTypes'" "$RUNNER_TEMP/web-shell-strict.log"
+          ./node_modules/.bin/tsc --noEmit --target ES2021 --module ESNext --moduleResolution Bundler --jsx react-jsx --skipLibCheck true consumer.tsx
           ln -s "$RUNNER_TEMP/consumer/node_modules/@qwen-code/web-shell" "$RUNNER_TEMP/symlink-consumer/node_modules/@qwen-code/web-shell"
           ln -s "$RUNNER_TEMP/consumer/node_modules/@qwen-code/sdk" "$RUNNER_TEMP/symlink-consumer/node_modules/@qwen-code/sdk"
           cp resolve.mjs "$RUNNER_TEMP/symlink-consumer/resolve.mjs"
