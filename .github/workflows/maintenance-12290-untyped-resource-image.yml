@@ -1,0 +1,225 @@
+name: Validate issue 12290 untyped MCP image sniffing
+on:
+  push:
+    branches: [validation/12290-untyped-resource-image]
+    paths: [.github/workflows/maintenance-12290-untyped-resource-image.yml]
+permissions:
+  contents: read
+jobs:
+  focused-candidate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    env:
+      BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+      TARGET_TEST: sniffs an untyped embedded PNG ResourceBlock
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: eceaede18ea5c37404b79974c6d4833c12c23935
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify immutable baseline and environment
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          node --version
+          test "$(corepack pnpm --version)" = '11.24.0'
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Install locked dependencies and build workspace dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -120 "$RUNNER_TEMP/install.log"; exit 1; }
+          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -160 "$RUNNER_TEMP/build.log"; exit 1; }
+          git restore --source=HEAD --staged --worktree .
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Prove intended baseline assertion fails
+        run: |
+          set -euo pipefail
+          cp packages/core/src/tools/mcp-tool.test.ts "$RUNNER_TEMP/mcp-tool.test.ts"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/core/src/tools/mcp-tool.test.ts')
+          s = p.read_text()
+          anchor = "    it('should handle a mix of content block types', async () => {\n"
+          test = r'''    it('sniffs an untyped embedded PNG ResourceBlock', async () => {
+      const params = { param: 'get' };
+      const pngSignature = 'iVBORw0KGgo=';
+      const sdkResponse: Part[] = [
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'file:///path/to/image.bin',
+                    blob: pngSignature,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      ];
+      mockCallTool.mockResolvedValue(sdkResponse);
+
+      const invocation = tool.build(params);
+      const toolResult = await invocation.execute(new AbortController().signal);
+
+      expect(toolResult.llmContent).toEqual([
+        {
+          text: `[Tool '${serverToolName}' provided the following embedded resource with mime-type: image/png]`,
+        },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: pngSignature,
+          },
+        },
+      ]);
+      expect(toolResult.returnDisplay).toBe(
+        `[Tool '${serverToolName}' provided the following embedded resource with mime-type: image/png]\n[image/png]`,
+      );
+    });
+
+'''
+          assert s.count(anchor) == 1, s.count(anchor)
+          p.write_text(s.replace(anchor, test + anchor, 1))
+          PY
+          set +e
+          (cd packages/core && NO_COLOR=1 npm run test:ci -- --retry=0 src/tools/mcp-tool.test.ts -t "$TARGET_TEST") > "$RUNNER_TEMP/baseline.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/baseline.log"
+          test "$rc" -ne 0
+          grep -F "$TARGET_TEST" "$RUNNER_TEMP/baseline.log"
+          grep -F "application/octet-stream" "$RUNNER_TEMP/baseline.log"
+          cp "$RUNNER_TEMP/mcp-tool.test.ts" packages/core/src/tools/mcp-tool.test.ts
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Apply minimal candidate repair
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/core/src/tools/mcp-tool.ts')
+          s = p.read_text()
+          anchor = "import { buildMcpClassifierInput } from './mcp-classifier-input.js';\n"
+          addition = "import { sniffFileKind } from '../utils/binary-content.js';\n"
+          assert s.count(anchor) == 1, s.count(anchor)
+          s = s.replace(anchor, anchor + addition, 1)
+          old = """  if (resource?.blob) {\n    const mimeType = resource.mimeType || 'application/octet-stream';\n    return [\n"""
+          new = """  if (resource?.blob) {\n    let mimeType = resource.mimeType;\n    if (!mimeType) {\n      // Decode only the aligned prefix needed by the existing magic-byte\n      // sniffer; do not allocate the whole untrusted MCP payload just to\n      // determine whether an otherwise-untyped resource is a model-safe image.\n      const kind = sniffFileKind(\n        Buffer.from(resource.blob.slice(0, 24), 'base64'),\n        '',\n        '',\n        '',\n      );\n      if (\n        kind.magicMatched &&\n        ['image/jpeg', 'image/png', 'image/webp'].includes(kind.mimeType)\n      ) {\n        mimeType = kind.mimeType;\n      }\n    }\n    mimeType ||= 'application/octet-stream';\n    return [\n"""
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('packages/core/src/tools/mcp-tool.test.ts')
+          s = p.read_text()
+          anchor = "    it('should handle a mix of content block types', async () => {\n"
+          test = r'''    it('sniffs an untyped embedded PNG ResourceBlock', async () => {
+      const params = { param: 'get' };
+      const pngSignature = 'iVBORw0KGgo=';
+      const sdkResponse: Part[] = [
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'file:///path/to/image.bin',
+                    blob: pngSignature,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      ];
+      mockCallTool.mockResolvedValue(sdkResponse);
+
+      const invocation = tool.build(params);
+      const toolResult = await invocation.execute(new AbortController().signal);
+
+      expect(toolResult.llmContent).toEqual([
+        {
+          text: `[Tool '${serverToolName}' provided the following embedded resource with mime-type: image/png]`,
+        },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: pngSignature,
+          },
+        },
+      ]);
+      expect(toolResult.returnDisplay).toBe(
+        `[Tool '${serverToolName}' provided the following embedded resource with mime-type: image/png]\n[image/png]`,
+      );
+    });
+
+'''
+          assert s.count(anchor) == 1, s.count(anchor)
+          p.write_text(s.replace(anchor, test + anchor, 1))
+          PY
+          git diff --check
+          git diff -- packages/core/src/tools/mcp-tool.ts packages/core/src/tools/mcp-tool.test.ts
+      - name: Run candidate focused and file regressions
+        run: |
+          set -euo pipefail
+          (cd packages/core && NO_COLOR=1 npm run test:ci -- --retry=0 src/tools/mcp-tool.test.ts -t "$TARGET_TEST") | tee "$RUNNER_TEMP/candidate-focused.log"
+          grep -F "$TARGET_TEST" "$RUNNER_TEMP/candidate-focused.log"
+          grep -E '1 passed|passed' "$RUNNER_TEMP/candidate-focused.log"
+          (cd packages/core && NO_COLOR=1 npm run test:ci -- --retry=0 src/tools/mcp-tool.test.ts) | tee "$RUNNER_TEMP/candidate-file.log"
+          grep -E '[0-9]+ passed' "$RUNNER_TEMP/candidate-file.log"
+      - name: Run candidate Core quality gates
+        run: |
+          set -euo pipefail
+          npm run typecheck --workspace=@qwen-code/core
+          npm run lint --workspace=@qwen-code/core > "$RUNNER_TEMP/lint.log" 2>&1 || { tail -120 "$RUNNER_TEMP/lint.log"; exit 1; }
+          printf '%s\0' \
+            packages/core/src/tools/mcp-tool.ts \
+            packages/core/src/tools/mcp-tool.test.ts \
+            | xargs -0 node_modules/.bin/prettier --check
+          git diff --check
+          git diff --name-only "$BASE_SHA" -- | sort | tee "$RUNNER_TEMP/changed.txt"
+          test "$(wc -l < "$RUNNER_TEMP/changed.txt")" -eq 2
+          grep -Fx 'packages/core/src/tools/mcp-tool.test.ts' "$RUNNER_TEMP/changed.txt"
+          grep -Fx 'packages/core/src/tools/mcp-tool.ts' "$RUNNER_TEMP/changed.txt"
+      - name: Capture candidate files
+        run: |
+          set -euo pipefail
+          git diff --binary "$BASE_SHA" -- \
+            packages/core/src/tools/mcp-tool.ts \
+            packages/core/src/tools/mcp-tool.test.ts \
+            > "$RUNNER_TEMP/candidate.diff"
+          test -s "$RUNNER_TEMP/candidate.diff"
+      - name: Upload candidate files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-12290-candidate-files
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            packages/core/src/tools/mcp-tool.ts
+            packages/core/src/tools/mcp-tool.test.ts
+            ${{ runner.temp }}/candidate.diff
+      - name: Report candidate diff state
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          git status --short
+          git diff --check || true
