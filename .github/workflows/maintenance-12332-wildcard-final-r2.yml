@@ -21,7 +21,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: 22
+          node-version: 22.16.0
       - name: Verify immutable source and scope
         run: |
           set -euo pipefail
@@ -30,7 +30,7 @@ jobs:
           test "$(git merge-base HEAD "$BASE_SHA")" = "$BASE_SHA"
           test "$(git diff --name-only "$BASE_SHA" HEAD | wc -l)" -eq 2
           test "$(git diff --name-only "$BASE_SHA" HEAD | sort | tr '\n' ' ')" = 'packages/web-shell/scripts/verify-publish-artifacts.mjs scripts/tests/web-shell-publish-artifacts.test.js '
-          node --version
+          test "$(node --version)" = 'v22.16.0'
           test "$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")" = "$(corepack pnpm --version)"
           df -h .
           git diff --exit-code
@@ -45,7 +45,19 @@ jobs:
           git restore --source=HEAD --staged --worktree .
           git diff --exit-code
           git diff --cached --exit-code
-      - name: Run focused wildcard and existing verifier regressions
+      - name: Test literal export omitted from tarball
+        run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js -t 'refuses an export target that exists on disk but is left out of the tarball'
+      - name: Test relative chunk omitted from tarball
+        run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js -t 'refuses a relative chunk that lands in a subdirectory `files` does not reach'
+      - name: Test missing literal export fails closed
+        run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js -t 'still fails closed on an export target that was never built'
+      - name: Test packed wildcard export is accepted
+        run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts a packed wildcard export target without statting the literal star'
+      - name: Test unpacked wildcard export fails closed
+        run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js -t 'refuses a built wildcard target that is omitted from the tarball'
+      - name: Test actual published package shape
+        run: npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts the shape the published package actually ships'
+      - name: Run complete verifier regression suite and formatting
         run: |
           set -euo pipefail
           npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js > "$RUNNER_TEMP/focused.log" 2>&1 || { tail -160 "$RUNNER_TEMP/focused.log"; exit 1; }
