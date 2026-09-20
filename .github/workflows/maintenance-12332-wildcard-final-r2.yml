@@ -1,0 +1,119 @@
+name: Validate issue 12332 wildcard verifier fix r2
+on:
+  push:
+    branches: [validation/12332-wildcard-final-r2]
+    paths: [.github/workflows/maintenance-12332-wildcard-final-r2.yml]
+permissions:
+  contents: read
+jobs:
+  exact-candidate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      PRODUCT_SHA: 48390309b9cfe41195793503af9235d38646ba10
+      BASE_SHA: 46f6aebdc3966cb41a9c87d0240991be8ab78713
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 48390309b9cfe41195793503af9235d38646ba10
+          fetch-depth: 50
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Verify immutable source and scope
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git fetch --no-tags --depth=50 https://github.com/QwenLM/qwen-code.git "$BASE_SHA"
+          test "$(git merge-base HEAD "$BASE_SHA")" = "$BASE_SHA"
+          test "$(git diff --name-only "$BASE_SHA" HEAD | wc -l)" -eq 2
+          test "$(git diff --name-only "$BASE_SHA" HEAD | sort | tr '\n' ' ')" = 'packages/web-shell/scripts/verify-publish-artifacts.mjs scripts/tests/web-shell-publish-artifacts.test.js '
+          node --version
+          test "$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")" = "$(corepack pnpm --version)"
+          df -h .
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Install locked dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile > "$RUNNER_TEMP/install.log" 2>&1 || { tail -120 "$RUNNER_TEMP/install.log"; exit 1; }
+          git restore --source=HEAD --staged --worktree .
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Run focused wildcard and existing verifier regressions
+        run: |
+          set -euo pipefail
+          npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js > "$RUNNER_TEMP/focused.log" 2>&1 || { tail -160 "$RUNNER_TEMP/focused.log"; exit 1; }
+          grep -F '6 passed' "$RUNNER_TEMP/focused.log" >/dev/null || { cat "$RUNNER_TEMP/focused.log"; exit 1; }
+          tail -40 "$RUNNER_TEMP/focused.log"
+          node_modules/.bin/prettier --check packages/web-shell/scripts/verify-publish-artifacts.mjs scripts/tests/web-shell-publish-artifacts.test.js
+      - name: Build and verify the real Web Shell package
+        run: |
+          set -euo pipefail
+          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -180 "$RUNNER_TEMP/build.log"; exit 1; }
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+          (
+            cd packages/web-shell
+            npm pack --dry-run --json --ignore-scripts > "$RUNNER_TEMP/pack-dry.json"
+            npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/pack.json"
+          )
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const report = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/pack-dry.json', 'utf8'))[0];
+          const files = new Set(report.files.map(({ path }) => path));
+          for (const required of [
+            'dist/index.js',
+            'dist/daemon-react-sdk.js',
+            'dist/transcript.js',
+            'dist/types/index.d.ts',
+            'dist/types/daemon-react-sdk.d.ts',
+            'dist/types/transcript.d.ts',
+          ]) {
+            if (!files.has(required)) throw new Error(`packed artifact missing ${required}`);
+          }
+          NODE
+          TARBALL="$(node -p "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP + '/pack.json','utf8'))[0].filename")"
+          mkdir -p "$RUNNER_TEMP/consumer/node_modules/@qwen-code"
+          tar -xzf "$RUNNER_TEMP/$TARBALL" -C "$RUNNER_TEMP/consumer/node_modules/@qwen-code"
+          mv "$RUNNER_TEMP/consumer/node_modules/@qwen-code/package" "$RUNNER_TEMP/consumer/node_modules/@qwen-code/web-shell"
+          (
+            cd "$RUNNER_TEMP/consumer"
+            node --input-type=module <<'NODE'
+          import { existsSync, readFileSync } from 'node:fs';
+          import { dirname, resolve } from 'node:path';
+          import { fileURLToPath } from 'node:url';
+          const entry = fileURLToPath(import.meta.resolve('@qwen-code/web-shell'));
+          if (!entry.endsWith('/dist/index.js')) throw new Error(`unexpected packed export resolution: ${entry}`);
+          const pkgRoot = resolve(dirname(entry), '..');
+          const pkg = JSON.parse(readFileSync(resolve(pkgRoot, 'package.json'), 'utf8'));
+          const targets = Object.values(pkg.exports).flatMap((value) => typeof value === 'string' ? [value] : Object.values(value));
+          for (const target of targets) {
+            if (!existsSync(resolve(pkgRoot, target))) throw new Error(`consumer cannot resolve ${target}`);
+          }
+          NODE
+          )
+          mkdir -p "$RUNNER_TEMP/symlink-consumer/node_modules/@qwen-code"
+          ln -s "$RUNNER_TEMP/consumer/node_modules/@qwen-code/web-shell" "$RUNNER_TEMP/symlink-consumer/node_modules/@qwen-code/web-shell"
+          (
+            cd "$RUNNER_TEMP/symlink-consumer"
+            node --input-type=module -e "const u=import.meta.resolve('@qwen-code/web-shell'); if (!u.endsWith('/dist/index.js')) throw new Error(u); console.log(u)"
+          )
+      - name: Run literal repository preflight
+        run: |
+          set -euo pipefail
+          npm run preflight > "$RUNNER_TEMP/preflight.log" 2>&1 || { rc=$?; tail -220 "$RUNNER_TEMP/preflight.log"; exit "$rc"; }
+          tail -100 "$RUNNER_TEMP/preflight.log"
+      - name: Audit exact source residue
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git status --short
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
