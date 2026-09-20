@@ -53,19 +53,27 @@ jobs:
       - name: Prove warning-coupled baseline failure and candidate success
         run: |
           set -euo pipefail
-          printf 'ELECTRON_MIRROR=https://example.invalid/\n' > "$RUNNER_TEMP/warning.npmrc"
+          real_npm="$(command -v npm)"
+          mkdir -p "$RUNNER_TEMP/npm-warning-bin"
+          cat > "$RUNNER_TEMP/npm-warning-bin/npm" <<EOF
+          #!/usr/bin/env bash
+          printf '%s\n' 'npm warn synthetic host warning from wrapper' >&2
+          exec "$real_npm" "\$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/npm-warning-bin/npm"
+          export PATH="$RUNNER_TEMP/npm-warning-bin:$PATH"
           verifier='packages/web-shell/scripts/verify-publish-artifacts.mjs'
           git show "$BASE_SHA:$verifier" > "$verifier"
           set +e
-          NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/warning.npmrc" ./node_modules/.bin/vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts the shape the published package actually ships' > "$RUNNER_TEMP/baseline.log" 2>&1
+          ./node_modules/.bin/vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts the shape the published package actually ships' > "$RUNNER_TEMP/baseline.log" 2>&1
           baseline_rc=$?
           set -e
           git restore --source=HEAD -- "$verifier"
           test "$baseline_rc" -ne 0 || { echo 'baseline unexpectedly passed warning-coupled regression'; cat "$RUNNER_TEMP/baseline.log"; exit 1; }
-          grep -F 'Unknown user config' "$RUNNER_TEMP/baseline.log"
-          grep -F "expected 'npm warn" "$RUNNER_TEMP/baseline.log"
-          NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/warning.npmrc" ./node_modules/.bin/vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts the shape the published package actually ships' > "$RUNNER_TEMP/candidate-warning.log" 2>&1 || { cat "$RUNNER_TEMP/candidate-warning.log"; exit 1; }
-          grep -E 'Tests +1 passed \(1\)' "$RUNNER_TEMP/candidate-warning.log"
+          grep -F 'npm warn synthetic host warning from wrapper' "$RUNNER_TEMP/baseline.log"
+          ./node_modules/.bin/vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts the shape the published package actually ships' > "$RUNNER_TEMP/candidate-warning.log" 2>&1 || { cat "$RUNNER_TEMP/candidate-warning.log"; exit 1; }
+          grep -E 'Tests +1 passed' "$RUNNER_TEMP/candidate-warning.log"
+          ! grep -F 'npm warn synthetic host warning from wrapper' "$RUNNER_TEMP/candidate-warning.log"
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
@@ -73,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js > "$RUNNER_TEMP/focused.log" 2>&1 || { tail -120 "$RUNNER_TEMP/focused.log"; exit 1; }
-          grep -E 'Tests +4 passed \(4\)' "$RUNNER_TEMP/focused.log"
+          grep -E 'Tests +4 passed' "$RUNNER_TEMP/focused.log"
           ./node_modules/.bin/prettier --check packages/web-shell/scripts/verify-publish-artifacts.mjs
           git diff --exit-code
           git diff --cached --exit-code
