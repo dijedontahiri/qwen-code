@@ -1,0 +1,145 @@
+name: Finalize issue 12230 candidate
+
+on:
+  push:
+    branches:
+      - automation/12230-finalizer-20260921
+    paths:
+      - .github/workflows/maintenance-12230-finalize.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+      - name: Fast-forward exact product branch
+        env:
+          PRODUCT_BRANCH: fix/12230-live-journal-settlement
+          EXPECTED_HEAD: 1ecdbb7ff854a89251642dba9f9195fc2ecbf041
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "$PRODUCT_BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD"
+          git checkout --detach "$EXPECTED_HEAD"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          src = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx')
+          s = src.read_text()
+          pairs = [
+            (
+              "  terminalSeen: boolean;\n  attempted: boolean;\n  withheldSettlement?: DaemonPromptSettledEvent;\n",
+              "  terminalSeen: boolean;\n  withheldSettlement?: DaemonPromptSettledEvent;\n  attempted: boolean;\n",
+            ),
+            (
+              "                if (settlement && repairTargetsTerminal && pendingRepair) {\n                  pendingRepair.withheldSettlement = settlement;\n                } else if (settlement && !repairTargetsTerminal) {\n                  publishPromptSettlement(settlement);\n                }\n",
+              "                if (settlement) {\n                  if (repairTargetsTerminal && pendingRepair) {\n                    pendingRepair.withheldSettlement = settlement;\n                  } else {\n                    publishPromptSettlement(settlement);\n                  }\n                }\n",
+            ),
+            (
+              "              } else if (repairingEpisode) {\n                liveJournalRepairRef.current = undefined;\n              }\n",
+              "              } else if (repairingEpisode) {\n                liveJournalRepairRef.current = undefined;\n                if (repairingEpisode.withheldSettlement) {\n                  publishPromptSettlement(repairingEpisode.withheldSettlement);\n                }\n              }\n",
+            ),
+            (
+              "            if (repairingEpisode?.withheldSettlement) {\n              publishPromptSettlement(repairingEpisode.withheldSettlement);\n            }\n",
+              "",
+            ),
+          ]
+          for old, new in pairs:
+            assert s.count(old) == 1, old[:100]
+            s = s.replace(old, new, 1)
+          src.write_text(s)
+
+          test = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          s = test.read_text()
+          marker = "  it('withholds the live settlement while a journal repair targets the same prompt', async () => {"
+          before, body = s.split(marker, 1)
+
+          old = "    const terminalGate = createDeferred<void>();\n"
+          new = "    const terminalGate = createDeferred<void>();\n    const repairGate = createDeferred<void>();\n"
+          assert body.count(old) >= 1
+          body = body.replace(old, new, 1)
+
+          old = "    sdkMocks.sessions.push(initialSession, repairedSession);\n    const settlements: DaemonPromptSettledEvent[] = [];\n"
+          new = """    sdkMocks.MockDaemonSessionClient.load
+      .mockImplementationOnce(async (client: unknown) => {
+        initialSession.client = client as MockClient;
+        return initialSession;
+      })
+      .mockImplementationOnce(async (client: unknown) => {
+        await repairGate.promise;
+        repairedSession.client = client as MockClient;
+        return repairedSession;
+      });
+    const settlements: DaemonPromptSettledEvent[] = [];
+"""
+          assert body.count(old) == 1
+          body = body.replace(old, new, 1)
+
+          old = """    expect(settlements).toEqual([]);
+    // Positive control: the episode really was armed for this prompt, and the
+    // terminal really did trigger the repair reload rather than being ignored.
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
+      );
+      await flushPromises();
+    });
+    // The repair reapplies the complete transcript before releasing the exact
+    // settlement withheld from the live path. A never-admitted prompt does not
+    // need to pass the ordinary replay admission gate to receive that settlement.
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-repair',
+        promptId: 'prompt-live',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+"""
+          new = """    expect(settlements).toEqual([]);
+    // Positive control: the episode really was armed for this prompt and the
+    // terminal started the repair, while publication is still withheld until
+    // the repaired projection is available.
+    await vi.waitFor(() =>
+      expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
+    );
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      repairGate.resolve();
+      await flushPromises();
+      await flushTranscriptDispatch();
+    });
+
+    // The repair reapplies the complete transcript before releasing the exact
+    // settlement withheld from the live path. A never-admitted prompt does not
+    // need to pass the ordinary replay admission gate to receive that settlement.
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-repair',
+        promptId: 'prompt-live',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+"""
+          assert body.count(old) == 1
+          body = body.replace(old, new, 1)
+          test.write_text(before + marker + body)
+          PY
+          expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
+          test "$(git diff --name-only | sort)" = "$expected"
+          git diff --check
+          git config user.name "OpenAI automation"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+          git commit -m "fix(web-shell): gate settlement on repaired projection"
+          git push origin HEAD:"$PRODUCT_BRANCH"
