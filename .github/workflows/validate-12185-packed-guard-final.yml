@@ -1,0 +1,42 @@
+name: Validate 12185 packed export guard
+
+on:
+  push:
+    branches:
+      - validation/12185-packed-guard-final
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ae0adbb310e1dfc9835ea74058aa1e4205041e0d
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - name: Install locked dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: Focused packed-artifact regression
+        run: node_modules/.bin/vitest run --config scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js
+      - name: Build and verify Web Shell package
+        run: |
+          npm run build --workspace=packages/web-shell
+          node packages/web-shell/scripts/verify-publish-artifacts.mjs
+          (cd packages/web-shell && npm pack --dry-run --json --ignore-scripts > /tmp/web-shell-pack.json)
+          node -e "const p=require('/tmp/web-shell-pack.json'); if(!Array.isArray(p)||p.length!==1||!p[0].files?.length) process.exit(1)"
+      - name: Repository preflight
+        run: npm run preflight
+      - name: Confirm immutable clean source
+        run: |
+          test "$(git rev-parse HEAD)" = "ae0adbb310e1dfc9835ea74058aa1e4205041e0d"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
