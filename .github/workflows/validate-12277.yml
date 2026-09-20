@@ -1,0 +1,96 @@
+name: Validate issue 12277 exact source
+
+on:
+  push:
+    branches:
+      - validation/12277-ecf6eb17
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCT_SHA: ecf6eb176b506473954f6c4b6ab79db1ba9784e7
+      BASE_SHA: 22de13d0807eb801371d5f4aa5d9685881d03c5d
+    steps:
+      - name: Checkout immutable product source
+        uses: actions/checkout@v4
+        with:
+          ref: ecf6eb176b506473954f6c4b6ab79db1ba9784e7
+          fetch-depth: 2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Verify exact source and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          printf '%s\n' \
+            packages/cli/src/serve/local-control/service.test.ts \
+            packages/cli/src/serve/local-control/service.ts > /tmp/expected-files
+          git diff --name-only "$BASE_SHA" "$PRODUCT_SHA" | sort > /tmp/actual-files
+          diff -u /tmp/expected-files /tmp/actual-files
+          git diff --check "$BASE_SHA" "$PRODUCT_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          node --version
+          npm --version
+          df -h .
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Prove regression fails against the parent implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout "$BASE_SHA" -- packages/cli/src/serve/local-control/service.ts
+          set +e
+          npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts 2>&1 | tee /tmp/baseline.log
+          baseline_status=${PIPESTATUS[0]}
+          set -e
+          git checkout "$PRODUCT_SHA" -- packages/cli/src/serve/local-control/service.ts
+          if [ "$baseline_status" -eq 0 ]; then
+            echo 'Expected the port-fallback regression to fail on the parent implementation.' >&2
+            exit 1
+          fi
+          grep -F "falls back to a free LAN port when the preferred port is in use" /tmp/baseline.log
+          test -z "$(git diff --name-only "$PRODUCT_SHA" -- packages/cli/src/serve/local-control/service.ts)"
+
+      - name: Run focused Local Control regression
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts
+
+      - name: Check changed-file formatting
+        run: npx prettier --check packages/cli/src/serve/local-control/service.ts packages/cli/src/serve/local-control/service.test.ts
+
+      - name: Lint changed files
+        run: npx eslint packages/cli/src/serve/local-control/service.ts packages/cli/src/serve/local-control/service.test.ts --max-warnings 0
+
+      - name: Typecheck CLI workspace
+        run: npm run typecheck --workspace=packages/cli
+
+      - name: Run full repository preflight
+        run: npm run preflight
+
+      - name: Audit exact product source after validation
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code "$PRODUCT_SHA" --
+          git diff --cached --exit-code
+          nonignored_untracked="$(git ls-files --others --exclude-standard)"
+          if [ -n "$nonignored_untracked" ]; then
+            printf 'Unexpected non-ignored untracked files:\n%s\n' "$nonignored_untracked" >&2
+            exit 1
+          fi
