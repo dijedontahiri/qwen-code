@@ -13,6 +13,7 @@ jobs:
     env:
       PRODUCT_SHA: a245488529af449d77f7a799d11db3d143c7d53c
       BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+      NO_COLOR: '1'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
