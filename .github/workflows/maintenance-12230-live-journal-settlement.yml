@@ -1,0 +1,206 @@
+name: Validate issue 12230 live-journal settlement repair
+
+on:
+  push:
+    branches:
+      - validation/12230-live-journal-settlement
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+      TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
+    steps:
+      - name: Checkout immutable upstream base
+        uses: actions/checkout@v4
+        with:
+          repository: QwenLM/qwen-code
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 1
+
+      - name: Verify environment and source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test -z "$(git status --short)"
+          node --version || true
+          df -h .
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile
+
+      - name: Prove baseline regression assertion fails
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          text = path.read_text()
+          old = """    // Current behavior, not desired, pinned deliberately: the replay publish is
+    // gated on local admission and this prompt was never admitted, so the
+    // settlement the live path withheld is never re-published (#12230).
+    expect(settlements).toEqual([]);
+"""
+          new = """    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-repair',
+        promptId: 'prompt-live',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+"""
+          if text.count(old) != 1:
+              raise SystemExit('baseline oracle anchor count mismatch')
+          path.write_text(text.replace(old, new))
+          PY
+          set +e
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME") > "$RUNNER_TEMP/baseline.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo 'Baseline unexpectedly passed the desired settlement assertion'
+            cat "$RUNNER_TEMP/baseline.log"
+            exit 1
+          fi
+          grep -F "$TEST_NAME" "$RUNNER_TEMP/baseline.log"
+          grep -E 'AssertionError|expected .*deeply equal|expected.*to deeply equal' "$RUNNER_TEMP/baseline.log"
+          git checkout -- packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+          test -z "$(git status --short)"
+
+      - name: Apply minimal product repair and regression expectation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          source = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx')
+          text = source.read_text()
+          replacements = [
+              (
+                  """  terminalSeen: boolean;
+  attempted: boolean;
+""",
+                  """  terminalSeen: boolean;
+  withheldSettlement?: DaemonPromptSettledEvent;
+  attempted: boolean;
+""",
+              ),
+              (
+                  """                if (settlement && !repairTargetsTerminal) {
+                  publishPromptSettlement(settlement);
+                }
+""",
+                  """                if (settlement) {
+                  if (repairTargetsTerminal && pendingRepair) {
+                    pendingRepair.withheldSettlement = settlement;
+                  } else {
+                    publishPromptSettlement(settlement);
+                  }
+                }
+""",
+              ),
+              (
+                  """              } else if (repairingEpisode) {
+                liveJournalRepairRef.current = undefined;
+              }
+""",
+                  """              } else if (repairingEpisode) {
+                liveJournalRepairRef.current = undefined;
+                if (repairingEpisode.withheldSettlement) {
+                  publishPromptSettlement(repairingEpisode.withheldSettlement);
+                }
+              }
+""",
+              ),
+          ]
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise SystemExit(f'product anchor count mismatch: {old[:60]!r}')
+              text = text.replace(old, new)
+          source.write_text(text)
+
+          test = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          text = test.read_text()
+          old_intro = """    // The repair reload reads the whole turn back. Its replay publishes
+    // nothing here either — the prompt was never locally bound — so the
+    // assertion below cannot be satisfied by a second, post-repair publish.
+"""
+          new_intro = """    // The repair reload reads the whole turn back. Replay remains gated on
+    // local admission, so this never-bound prompt can settle only by re-publishing
+    // the one live settlement withheld specifically for this repair.
+"""
+          old_final = """    // Current behavior, not desired, pinned deliberately: the replay publish is
+    // gated on local admission and this prompt was never admitted, so the
+    // settlement the live path withheld is never re-published (#12230).
+    expect(settlements).toEqual([]);
+"""
+          new_final = """    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-repair',
+        promptId: 'prompt-live',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+"""
+          for old, new in ((old_intro, new_intro), (old_final, new_final)):
+              if text.count(old) != 1:
+                  raise SystemExit(f'test anchor count mismatch: {old[:60]!r}')
+              text = text.replace(old, new)
+          test.write_text(text)
+          PY
+          changed="$(git diff --name-only | sort)"
+          expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
+          test "$changed" = "$expected"
+          git diff --check
+          git diff > "$RUNNER_TEMP/candidate.patch"
+
+      - name: Run focused regression and Web Shell quality gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/web-shell
+          npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME"
+          npm run typecheck
+          npm run lint
+          npm run format:check
+
+      - name: Run literal repository preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run preflight
+
+      - name: Audit exact patched source
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          changed="$(git diff --name-only | sort)"
+          expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
+          test "$changed" = "$expected"
+          git diff > "$RUNNER_TEMP/after.patch"
+          cmp "$RUNNER_TEMP/candidate.patch" "$RUNNER_TEMP/after.patch"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
