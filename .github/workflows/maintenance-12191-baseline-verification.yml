@@ -1,0 +1,176 @@
+name: Classify PR 12191 reconciliation failures
+on:
+  push:
+    branches: [validation/12191-merge-audit-20260920-r2]
+    paths: [.github/workflows/maintenance-12191-baseline-verification.yml]
+permissions:
+  contents: read
+jobs:
+  upstream-baseline:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QwenLM/qwen-code
+          ref: be9ed41afd2f59492cd372fbe1d52b653e42f3b8
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Install frozen baseline prerequisites
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = be9ed41afd2f59492cd372fbe1d52b653e42f3b8
+          corepack pnpm install --frozen-lockfile > "$RUNNER_TEMP/install.log" 2>&1 || { tail -60 "$RUNNER_TEMP/install.log"; exit 1; }
+          git diff --stat
+          git restore --source=HEAD --staged --worktree .
+          git diff --exit-code
+      - name: Build unmodified upstream baseline
+        run: |
+          set -euo pipefail
+          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build.log"; exit 1; }
+          grep 'Document export renderer JS' "$RUNNER_TEMP/build.log"
+          git diff --exit-code
+      - name: Compare the two actual failure files without retries
+        id: tests
+        run: |
+          set -euo pipefail
+          set +e
+          npm run test:ci --workspace=@qwen-code/web-shell -- --retry=0 components/BranchPickerPopover.test.tsx live/messages.test.ts > "$RUNNER_TEMP/tests.log" 2>&1
+          rc=$?
+          set -e
+          echo "BASELINE_TEST_EXIT=$rc"
+          python3 - <<'PY'
+          import pathlib,xml.etree.ElementTree as ET,re,os
+          root=ET.parse('packages/web-shell/junit.xml').getroot()
+          failed=[]
+          for case in root.iter('testcase'):
+              error=case.find('failure')
+              if error is not None:
+                  item={'class':case.get('classname'),'name':case.get('name'),'message':error.get('message')}
+                  failed.append(item)
+          import json
+          print('BASELINE_FAILURES='+json.dumps(failed))
+          print('BASELINE_TESTCASES='+str(len(list(root.iter('testcase')))))
+          lines=re.sub(r'\x1b\[[0-9;]*m','',pathlib.Path(os.environ['RUNNER_TEMP']+'/tests.log').read_text(errors='replace')).splitlines()
+          for i,line in enumerate(lines):
+              if re.search(r'\bFAIL\s|AssertionError',line):
+                  print('\n'.join(lines[i:i+8]))
+          print('\n'.join(lines[-15:]))
+          PY
+          # Preserve the actual upstream test result. A failed baseline is NOT a green product check.
+          exit "$rc"
+      - name: Audit unchanged baseline source
+        if: always()
+        run: |
+          git status --short
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+  scoped-candidate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      PRODUCT_SHA: 3ec369460d5e667289e297961457dd259dba42a7
+      UPSTREAM_SHA: be9ed41afd2f59492cd372fbe1d52b653e42f3b8
+      EXPECTED_TREE: 7779a2c2f49dac486495423ca3cefbc8ceb204d4
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 3ec369460d5e667289e297961457dd259dba42a7
+          fetch-depth: 500
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Recreate precisely the previously built and tested candidate tree
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=500 https://github.com/QwenLM/qwen-code.git "$UPSTREAM_SHA"
+          git config user.name Dijedon
+          git config user.email 99071957+dijedontahiri@users.noreply.github.com
+          set +e
+          git -c core.hooksPath=/dev/null merge --no-commit --no-ff "$UPSTREAM_SHA" > "$RUNNER_TEMP/merge.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -eq 1
+          test "$(git diff --name-only --diff-filter=U)" = packages/web-templates/src/export-html/build.mjs
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('packages/web-templates/src/export-html/build.mjs')
+          s=p.read_text(); pattern=r'^<<<<<<< HEAD\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]+\n'
+          matches=list(re.finditer(pattern,s,re.M|re.S)); assert len(matches)==1
+          ours,theirs=matches[0].group(1,2)
+          assert 'MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000' in ours
+          assert 'MAX_DOCUMENT_RUNTIME_BYTES = 2_030_000' in theirs
+          p.write_text(s[:matches[0].start()]+ours+s[matches[0].end():])
+          PY
+          git add packages/web-templates/src/export-html/build.mjs
+          git -c core.hooksPath=/dev/null commit -m 'fix(web-shell): reconcile document budget with upstream changes'
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          git diff --quiet "$UPSTREAM_SHA" HEAD -- pnpm-lock.yaml package.json packages/web-shell/client/components/BranchPickerPopover.tsx packages/web-shell/client/components/BranchPickerPopover.test.tsx packages/web-shell/client/live packages/web-shell/client/components/composer/AddMenu.tsx
+          git diff --stat "$UPSTREAM_SHA" HEAD
+      - name: Install frozen prerequisites
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile > "$RUNNER_TEMP/install.log" 2>&1 || { tail -60 "$RUNNER_TEMP/install.log"; exit 1; }
+          git diff --stat
+          git restore --source=HEAD --staged --worktree .
+          git diff --exit-code
+      - name: Build complete candidate workspace
+        run: |
+          set -euo pipefail
+          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build.log"; exit 1; }
+          grep 'Document export renderer JS' "$RUNNER_TEMP/build.log"
+          git diff --exit-code
+      - name: Verify all changed-area regressions, types and lint
+        run: |
+          set -euo pipefail
+          npm run test:ci --workspace=@qwen-code/web-shell -- --retry=0 build-boundary.test.ts package-externalization.artifact.test.ts McpApp.document.dom.test.tsx > "$RUNNER_TEMP/focused.log" 2>&1 || { tail -80 "$RUNNER_TEMP/focused.log"; exit 1; }
+          tail -12 "$RUNNER_TEMP/focused.log"
+          npm run test:scripts -- scripts/tests/document-mcp-stub-guard.test.js scripts/tests/web-terminal-build.test.ts > "$RUNNER_TEMP/scripts.log" 2>&1 || { tail -80 "$RUNNER_TEMP/scripts.log"; exit 1; }
+          tail -15 "$RUNNER_TEMP/scripts.log"
+          npm run typecheck --workspace=@qwen-code/web-shell
+          npm run lint --workspace=@qwen-code/web-shell > "$RUNNER_TEMP/lint.log" 2>&1 || { tail -60 "$RUNNER_TEMP/lint.log"; exit 1; }
+          git diff --name-only "$UPSTREAM_SHA" HEAD -z | xargs -0 node_modules/.bin/prettier --check
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Preserve scoped-tested repair separately, without modifying the PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,os,pathlib,subprocess
+          repo='dijedontahiri/qwen-code'; upstream=os.environ['UPSTREAM_SHA']
+          def api(endpoint,payload=None):
+              args=['gh','api',f'repos/{repo}/{endpoint}']
+              if payload is not None: args += ['--method','POST','--input','-']
+              return json.loads(subprocess.check_output(args,input=None if payload is None else json.dumps(payload),text=True))
+          paths=subprocess.check_output(['git','diff','--name-only',upstream,'HEAD'],text=True).splitlines()
+          assert len(paths)==12 and not any('/channels/' in p or p.startswith('.github/') for p in paths)
+          entries=[]
+          for p in paths:
+              mode,kind,rest=subprocess.check_output(['git','ls-tree','HEAD','--',p],text=True).strip().split(' ',2)
+              assert mode in ('100644','100755') and kind=='blob'
+              blob=api('git/blobs',{'content':pathlib.Path(p).read_text(),'encoding':'utf-8'})
+              assert blob['sha']==rest.split('\t')[0]
+              entries.append({'path':p,'mode':mode,'type':'blob','sha':blob['sha']})
+          tree=api('git/trees',{'base_tree':subprocess.check_output(['git','rev-parse',upstream+'^{tree}'],text=True).strip(),'tree':entries})
+          assert tree['sha']==os.environ['EXPECTED_TREE'],'Saved tree must match both validation runs'
+          commit=api('git/commits',{'message':'fix(web-shell): reconcile document budget with upstream changes\n\nAI-assisted conflict maintenance. Scoped validation passed; complete Web Shell suite had two failures recorded in run 35495085137. This candidate remains subject to baseline classification and full preflight.', 'tree':tree['sha'],'parents':[os.environ['PRODUCT_SHA'],upstream]})
+          api('git/refs',{'ref':'refs/heads/fix/12191-upstream-reconcile-20260920-r2','sha':commit['sha']})
+          print('CANDIDATE_COMMIT='+commit['sha']);print('TESTED_TREE='+tree['sha'])
+          print('Original PR branch unchanged. This is a scoped-tested candidate, not full-preflight acceptance.')
+          PY
