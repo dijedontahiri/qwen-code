@@ -1,0 +1,98 @@
+name: Validate issue 12230 settlement republish
+on:
+  push:
+    branches: [validation/12230-live-journal-settlement]
+    paths: [.github/workflows/maintenance-12230-live-journal-settlement-r3.yml]
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+      TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QwenLM/qwen-code
+          ref: eceaede18ea5c37404b79974c6d4833c12c23935
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Install and build prerequisites
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -100 "$RUNNER_TEMP/install.log"; exit 1; }
+          npm run build
+          git restore --source=HEAD --staged --worktree .
+          test -z "$(git status --short)"
+      - name: Prove baseline desired settlement fails
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs=require('fs'); const p='packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx'; let s=fs.readFileSync(p,'utf8');
+          const old="    // Current behavior, not desired, pinned deliberately: the replay publish is\n    // gated on local admission and this prompt was never admitted, so the\n    // settlement the live path withheld is never re-published (#12230).\n    expect(settlements).toEqual([]);\n";
+          const val="    expect(settlements).toEqual([\n      {\n        sessionId: 'session-settle-repair',\n        promptId: 'prompt-live',\n        outcome: 'completed',\n        stopReason: 'end_turn',\n      },\n    ]);\n";
+          if(s.split(old).length!==2) throw Error('oracle anchor mismatch'); fs.writeFileSync(p,s.replace(old,val));
+          NODE
+          set +e
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME") > "$RUNNER_TEMP/baseline.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -F 'expected [] to deeply equal' "$RUNNER_TEMP/baseline.log"
+          git restore --source=HEAD --staged --worktree packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+      - name: Apply candidate patch
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs=require('fs');
+          let p='packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'; let s=fs.readFileSync(p,'utf8');
+          const pairs=[
+            ["  terminalSeen: boolean;\n  attempted: boolean;\n","  terminalSeen: boolean;\n  withheldSettlement?: DaemonPromptSettledEvent;\n  attempted: boolean;\n"],
+            ["                if (settlement && !repairTargetsTerminal) {\n                  publishPromptSettlement(settlement);\n                }\n","                if (settlement) {\n                  if (repairTargetsTerminal && pendingRepair) {\n                    pendingRepair.withheldSettlement = settlement;\n                  } else {\n                    publishPromptSettlement(settlement);\n                  }\n                }\n"],
+            ["              } else if (repairingEpisode) {\n                liveJournalRepairRef.current = undefined;\n              }\n","              } else if (repairingEpisode) {\n                liveJournalRepairRef.current = undefined;\n                if (repairingEpisode.withheldSettlement) {\n                  publishPromptSettlement(repairingEpisode.withheldSettlement);\n                }\n              }\n"]
+          ];
+          for(const [a,b] of pairs){if(s.split(a).length!==2) throw Error('source anchor mismatch'); s=s.replace(a,b);} fs.writeFileSync(p,s);
+          p='packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx'; s=fs.readFileSync(p,'utf8');
+          const expected="    expect(settlements).toEqual([\n      {\n        sessionId: 'session-settle-repair',\n        promptId: 'prompt-live',\n        outcome: 'completed',\n        stopReason: 'end_turn',\n      },\n    ]);\n";
+          const first="    expect(settlements).toEqual([]);\n    // Positive control: the episode really was armed for this prompt, and the\n";
+          const firstNew=expected+"    // Positive control: the episode really was armed for this prompt, and the\n";
+          if(s.split(first).length!==2) throw Error('first assertion anchor mismatch'); s=s.replace(first,firstNew);
+          const last="    // Current behavior, not desired, pinned deliberately: the replay publish is\n    // gated on local admission and this prompt was never admitted, so the\n    // settlement the live path withheld is never re-published (#12230).\n    expect(settlements).toEqual([]);\n";
+          if(s.split(last).length!==2) throw Error('last assertion anchor mismatch'); s=s.replace(last,expected);
+          fs.writeFileSync(p,s);
+          NODE
+          expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
+          test "$(git diff --name-only | sort)" = "$expected"
+          git diff --check
+          git diff > "$RUNNER_TEMP/candidate.patch"
+      - name: Focused regression and Web Shell quality gates
+        run: |
+          set -euo pipefail
+          cd packages/web-shell
+          npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME"
+          npm run typecheck
+          npm run lint
+          npm run format:check
+      - name: Literal repository preflight
+        run: npm run preflight
+      - name: Audit candidate source
+        if: always()
+        run: |
+          set -euo pipefail
+          git diff --check
+          expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
+          test "$(git diff --name-only | sort)" = "$expected"
+          git diff > "$RUNNER_TEMP/after.patch"
+          cmp "$RUNNER_TEMP/candidate.patch" "$RUNNER_TEMP/after.patch"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
