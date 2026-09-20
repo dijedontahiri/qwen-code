@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ae0adbb310e1dfc9835ea74058aa1e4205041e0d
+          ref: d2d98408d9cda1800af07d60ee1802c532cc524b
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -36,7 +36,7 @@ jobs:
         run: npm run preflight
       - name: Confirm immutable clean source
         run: |
-          test "$(git rev-parse HEAD)" = "ae0adbb310e1dfc9835ea74058aa1e4205041e0d"
+          test "$(git rev-parse HEAD)" = "d2d98408d9cda1800af07d60ee1802c532cc524b"
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
