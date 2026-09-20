@@ -1,0 +1,37 @@
+name: Inspect PR 12191 preflight evidence
+
+on:
+  push:
+    branches: [validation/12191-failure-isolation-20260920]
+    paths: [.github/workflows/inspect-12191-preflight-evidence.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Extract failure context without changing or rerunning product tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --allow-escape-sequences repos/dijedontahiri/qwen-code/actions/jobs/105995319806/logs > "$RUNNER_TEMP/preflight.log"
+          python3 - "$RUNNER_TEMP/preflight.log" <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path(sys.argv[1]).read_text(errors='replace')
+          lines = re.sub(r'\x1b\[[0-9;]*m', '', text).splitlines()
+          matches = [i for i, line in enumerate(lines) if re.search(r'FAIL |AssertionError|Expected:|Received:|Test Files|Tests\s+\d+ failed|Error:', line)]
+          selected = set()
+          for i in matches[-15:]:
+              selected.update(range(max(0, i - 3), min(len(lines), i + 14)))
+          for i in sorted(selected):
+              print(f'{i + 1}: {lines[i]}')
+          if not matches:
+              print('\n'.join(lines[-100:]))
+          PY
