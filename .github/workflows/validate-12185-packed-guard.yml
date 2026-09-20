@@ -12,7 +12,7 @@ jobs:
   baseline:
     if: github.repository == 'dijedontahiri/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,22 +21,64 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: corepack enable
-      - name: Install locked dependencies without lifecycle scripts
-        run: corepack pnpm install --frozen-lockfile --ignore-scripts
-      - name: Prove baseline regression is red
+      - name: Prove the old verifier false-passes an unpacked export
         run: |
-          set +e
-          node_modules/.bin/vitest run --config scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js > /tmp/baseline.log 2>&1
-          status=$?
-          set -e
-          cat /tmp/baseline.log
-          if [ "$status" -eq 0 ]; then
-            echo "Expected the regression to fail on the baseline verifier"
-            exit 1
-          fi
-          grep -F "expected 0 to be 1" /tmp/baseline.log
+          node --input-type=module <<'NODE'
+          import { execFileSync, spawnSync } from 'node:child_process';
+          import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+
+          const root = mkdtempSync(join(tmpdir(), 'qwen-web-shell-baseline-'));
+          try {
+            mkdirSync(join(root, 'scripts'), { recursive: true });
+            mkdirSync(join(root, 'dist/nested'), { recursive: true });
+            cpSync(
+              'packages/web-shell/scripts/verify-publish-artifacts.mjs',
+              join(root, 'scripts/verify-publish-artifacts.mjs'),
+            );
+            writeFileSync(
+              join(root, 'package.json'),
+              JSON.stringify({
+                name: '@qwen-code/web-shell',
+                version: '0.0.0-baseline',
+                type: 'module',
+                exports: { '.': { import: './dist/nested/index.js' } },
+                files: ['dist/*.js'],
+              }),
+            );
+            writeFileSync(join(root, 'dist/nested/index.js'), 'export const ok = true;\n');
+
+            const pack = JSON.parse(
+              execFileSync(
+                'npm',
+                ['pack', '--dry-run', '--json', '--ignore-scripts'],
+                { cwd: root, encoding: 'utf8' },
+              ),
+            );
+            const paths = pack[0].files.map((entry) => entry.path);
+            if (paths.includes('dist/nested/index.js')) {
+              throw new Error('negative control is ineffective: npm packed the omitted export');
+            }
+
+            const result = spawnSync(
+              process.execPath,
+              ['scripts/verify-publish-artifacts.mjs'],
+              { cwd: root, encoding: 'utf8' },
+            );
+            if (result.status !== 0) {
+              throw new Error(
+                `baseline verifier unexpectedly rejected the fixture: ${result.stderr}`,
+              );
+            }
+            console.log('BASELINE_FALSE_PASS_CONFIRMED');
+          } finally {
+            rmSync(root, { recursive: true, force: true });
+          }
+          NODE
       - name: Confirm immutable candidate source
         run: |
           test "$(git rev-parse HEAD)" = "737d013bfa3013ec0c391e3d413877d475d31f9e"
-          test -z "$(git status --porcelain --untracked-files=no)"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
