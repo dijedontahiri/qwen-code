@@ -1,0 +1,94 @@
+name: Validate issue 12351 pack warning isolation
+on:
+  push:
+    branches: [validation/12351-pack-warning]
+    paths: [.github/workflows/maintenance-12351-pack-warning.yml]
+permissions:
+  contents: read
+jobs:
+  exact-candidate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      PRODUCT_SHA: a245488529af449d77f7a799d11db3d143c7d53c
+      BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: a245488529af449d77f7a799d11db3d143c7d53c
+          fetch-depth: 20
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify immutable source and scope
+        run: |
+          set -euo pipefail
+          node --version
+          corepack pnpm --version
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git fetch --no-tags --depth=20 https://github.com/QwenLM/qwen-code.git "$BASE_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test "$(git merge-base HEAD "$BASE_SHA")" = "$BASE_SHA"
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 1
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA" HEAD)
+          test "${#changed[@]}" -eq 1
+          test "${changed[0]}" = 'packages/web-shell/scripts/verify-publish-artifacts.mjs'
+          git diff --check "$BASE_SHA" HEAD
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Install locked dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -120 "$RUNNER_TEMP/install.log"; exit 1; }
+          git restore --source=HEAD --staged --worktree .
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Prove warning-coupled baseline failure and candidate success
+        run: |
+          set -euo pipefail
+          printf 'ELECTRON_MIRROR=https://example.invalid/\n' > "$RUNNER_TEMP/warning.npmrc"
+          verifier='packages/web-shell/scripts/verify-publish-artifacts.mjs'
+          git show "$BASE_SHA:$verifier" > "$verifier"
+          set +e
+          NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/warning.npmrc" ./node_modules/.bin/vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts the shape the published package actually ships' > "$RUNNER_TEMP/baseline.log" 2>&1
+          baseline_rc=$?
+          set -e
+          git restore --source=HEAD -- "$verifier"
+          test "$baseline_rc" -ne 0 || { echo 'baseline unexpectedly passed warning-coupled regression'; cat "$RUNNER_TEMP/baseline.log"; exit 1; }
+          grep -F 'Unknown user config' "$RUNNER_TEMP/baseline.log"
+          grep -F "expected 'npm warn" "$RUNNER_TEMP/baseline.log"
+          NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/warning.npmrc" ./node_modules/.bin/vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts the shape the published package actually ships' > "$RUNNER_TEMP/candidate-warning.log" 2>&1 || { cat "$RUNNER_TEMP/candidate-warning.log"; exit 1; }
+          grep -E 'Tests +1 passed \(1\)' "$RUNNER_TEMP/candidate-warning.log"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Run focused verifier suite and formatting check
+        run: |
+          set -euo pipefail
+          npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js > "$RUNNER_TEMP/focused.log" 2>&1 || { tail -120 "$RUNNER_TEMP/focused.log"; exit 1; }
+          grep -E 'Tests +4 passed \(4\)' "$RUNNER_TEMP/focused.log"
+          ./node_modules/.bin/prettier --check packages/web-shell/scripts/verify-publish-artifacts.mjs
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Run literal repository preflight
+        run: |
+          set -euo pipefail
+          npm run preflight > "$RUNNER_TEMP/preflight.log" 2>&1 || { rc=$?; tail -220 "$RUNNER_TEMP/preflight.log"; exit "$rc"; }
+          tail -100 "$RUNNER_TEMP/preflight.log"
+      - name: Audit exact source residue
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git status --short
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
