@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 22
-      - name: Install locked diagnostic prerequisites
+      - name: Install locked diagnostic prerequisites and restore immutable source
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |
@@ -38,8 +38,14 @@ jobs:
           else
             npm ci --no-audit --no-fund
           fi
+          echo 'Installation may regenerate tracked documentation. Record it, verify test/package inputs were unchanged, then restore tracked source before applying any repair.'
+          git diff --stat
+          git diff --name-only
+          git diff --exit-code -- "$TEST_PATH" package.json package-lock.json pnpm-lock.yaml
+          git restore --source="$SOURCE_SHA" --staged --worktree .
           git diff --exit-code
           git diff --cached --exit-code
+          git ls-files --others --exclude-standard
           test -z "$(git ls-files --others --exclude-standard)"
       - name: Prove the original test depends on network timing
         run: |
@@ -165,7 +171,6 @@ jobs:
           '''
           import textwrap
           replacement = textwrap.dedent(replacement)
-          # The formatter below restores the repository's indentation.
           p.write_text(s[:a] + replacement + s[b:])
           PY
           node_modules/.bin/prettier --write "$TEST_PATH"
@@ -183,6 +188,7 @@ jobs:
             echo "=== Feishu suite attempt $attempt ==="
             (cd packages/channels/feishu && ../../../node_modules/.bin/vitest run --reporter=dot) > "$RUNNER_TEMP/feishu-$attempt.log" 2>&1 || { tail -100 "$RUNNER_TEMP/feishu-$attempt.log"; exit 1; }
             tail -12 "$RUNNER_TEMP/feishu-$attempt.log"
+            git ls-files --others --exclude-standard
             test -z "$(git ls-files --others --exclude-standard)"
           done
       - name: Verify exact one-file repair and preserve evidence
