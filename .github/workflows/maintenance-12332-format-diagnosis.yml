@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 48390309b9cfe41195793503af9235d38646ba10
+          ref: 718a97e31acc5137fe41f7dc9ae00664c23cb277
           fetch-depth: 20
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
@@ -29,7 +29,7 @@ jobs:
       - name: Verify immutable candidate
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = '48390309b9cfe41195793503af9235d38646ba10'
+          test "$(git rev-parse HEAD)" = '718a97e31acc5137fe41f7dc9ae00664c23cb277'
           git diff --exit-code
           git diff --cached --exit-code
       - name: Install locked dependencies
