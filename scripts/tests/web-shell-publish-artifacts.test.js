@@ -59,12 +59,12 @@ function write(fixture, name, contents) {
 // the build emits below `dist/` is on disk yet absent from the tarball.
 const files = ['dist/*.js', 'dist/types'];
 
-function declarePackage(fixture, exports) {
+function declarePackage(fixture, exports, packageFiles = files) {
   write(fixture, 'package.json', {
     name: 'fixture-web-shell',
     version: '0.0.0',
     type: 'module',
-    files,
+    files: packageFiles,
     exports,
   });
 }
@@ -124,6 +124,31 @@ describe('web-shell publish artifact verifier', () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('missing ./dist/absent.js');
+  });
+
+  it('accepts a packed wildcard export target without statting the literal star', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(
+        fixture,
+        { './*': './dist/src/*' },
+        ['dist/src/*'],
+      );
+      write(fixture, 'dist/src/example.js', 'export default 1;\n');
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  it('refuses a built wildcard target that is omitted from the tarball', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, { './*': './dist/src/*' });
+      write(fixture, 'dist/src/example.js', 'export default 1;\n');
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('./dist/src/* matches dist/src/example.js');
+    expect(result.stderr).toContain('not included in the npm package');
   });
 
   it('accepts the shape the published package actually ships', () => {
