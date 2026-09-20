@@ -22,7 +22,10 @@ const verifierPath = join(
 );
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
-function makeFixture({ entry = 'dist/index.js', source = 'export const ok = true;\n' } = {}) {
+function makeFixture({
+  entry = 'dist/index.js',
+  source = 'export const ok = true;\n',
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'qwen-web-shell-pack-'));
   mkdirSync(join(root, 'scripts'), { recursive: true });
   mkdirSync(dirname(join(root, entry)), { recursive: true });
@@ -91,7 +94,10 @@ describe('web-shell publish artifact verifier', () => {
       source: "import './nested/chunk.js';\nexport const ok = true;\n",
     });
     mkdirSync(join(root, 'dist/nested'), { recursive: true });
-    writeFileSync(join(root, 'dist/nested/chunk.js'), 'export const value = 1;\n');
+    writeFileSync(
+      join(root, 'dist/nested/chunk.js'),
+      'export const value = 1;\n',
+    );
     try {
       expect(packedPaths(root)).toContain('dist/index.js');
       expect(packedPaths(root)).not.toContain('dist/nested/chunk.js');
