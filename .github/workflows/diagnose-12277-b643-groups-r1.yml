@@ -1,0 +1,66 @@
+name: Diagnose issue 12277 group interactions r1
+
+on:
+  push:
+    branches:
+      - diagnostic/12277-b643-groups-r1
+    paths:
+      - .github/workflows/diagnose-12277-b643-groups-r1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      PRODUCT_SHA: b6437572385d29cd24ed5063c2edbdedcbdd965c
+    steps:
+      - name: Checkout immutable product source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Verify exact source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          corepack enable
+      - name: Install locked dependencies without heavy prepare
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: corepack pnpm install --frozen-lockfile
+      - name: Group first three
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'serializes lifecycle changes|orders disable after an in-flight enable|validates target before committing listener state'
+      - name: Group first four
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'serializes lifecycle changes|orders disable after an in-flight enable|validates target before committing listener state|reports sleep inhibition only when the inhibitor is running'
+      - name: Group last three
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'validates target before committing listener state|reports sleep inhibition only when the inhibitor is running|falls back to a free LAN port when the preferred port is in use'
+      - name: Group last four
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'orders disable after an in-flight enable|validates target before committing listener state|reports sleep inhibition only when the inhibitor is running|falls back to a free LAN port when the preferred port is in use'
+      - name: Group lifecycle target sleep fallback
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'serializes lifecycle changes|validates target before committing listener state|reports sleep inhibition only when the inhibitor is running|falls back to a free LAN port when the preferred port is in use'
+      - name: Group lifecycle ordering sleep fallback
+        continue-on-error: true
+        run: npm test --workspace=packages/cli -- src/serve/local-control/service.test.ts -t 'serializes lifecycle changes|orders disable after an in-flight enable|reports sleep inhibition only when the inhibitor is running|falls back to a free LAN port when the preferred port is in use'
+      - name: Audit immutable product source
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
