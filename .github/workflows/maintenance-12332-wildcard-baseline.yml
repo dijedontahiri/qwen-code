@@ -1,0 +1,63 @@
+name: Reproduce issue 12332 wildcard verifier baseline
+on:
+  push:
+    branches: [validation/12332-wildcard-baseline]
+    paths: [.github/workflows/maintenance-12332-wildcard-baseline.yml]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SOURCE_SHA: 9ca63e062a6d7a3f435e08e9ea6ee54e88505c99
+      BASE_SHA: 46f6aebdc3966cb41a9c87d0240991be8ab78713
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 9ca63e062a6d7a3f435e08e9ea6ee54e88505c99
+          fetch-depth: 20
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Verify test-only baseline identity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags --depth=20 https://github.com/QwenLM/qwen-code.git "$BASE_SHA"
+          test "$(git merge-base HEAD "$BASE_SHA")" = "$BASE_SHA"
+          test "$(git diff --name-only "$BASE_SHA" HEAD | wc -l)" -eq 1
+          test "$(git diff --name-only "$BASE_SHA" HEAD)" = 'scripts/tests/web-shell-publish-artifacts.test.js'
+          git diff --quiet "$BASE_SHA" HEAD -- packages/web-shell/scripts/verify-publish-artifacts.mjs
+          node --version
+          corepack pnpm --version
+          df -h .
+      - name: Install locked dependencies
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: corepack pnpm install --frozen-lockfile
+      - name: Prove wildcard literal-path regression
+        run: |
+          set -euo pipefail
+          set +e
+          npm run test:scripts -- scripts/tests/web-shell-publish-artifacts.test.js -t 'accepts a packed wildcard export target without statting the literal star' > "$RUNNER_TEMP/baseline.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo 'Baseline unexpectedly passed the wildcard regression'
+            cat "$RUNNER_TEMP/baseline.log"
+            exit 1
+          fi
+          grep -F 'accepts a packed wildcard export target without statting the literal star' "$RUNNER_TEMP/baseline.log"
+          grep -F 'missing ./dist/src/*' "$RUNNER_TEMP/baseline.log"
+          tail -80 "$RUNNER_TEMP/baseline.log"
+      - name: Audit source remains clean
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
