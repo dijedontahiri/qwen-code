@@ -207,6 +207,30 @@ export class LocalControlService {
     server.requestTimeout = REQUEST_TIMEOUT_MS;
     server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
 
+    const currentlyBoundPort = () => {
+      const address = server.address();
+      return address && typeof address !== 'string'
+        ? address.port
+        : preferredPort;
+    };
+    const currentAuthority = () =>
+      `${selected.address}:${currentlyBoundPort()}`;
+
+    // Install the listener identity before either bind attempt. Its endpoint
+    // properties are accessors over server.address(), so as soon as a fallback
+    // socket is bound they expose the final OS-selected port even before our
+    // `listening` callback runs. An early request therefore cannot be
+    // misclassified with the rejected preferred authority.
+    tagListener(server, {
+      kind: 'local-control',
+      get authority() {
+        return currentAuthority();
+      },
+      get origin() {
+        return new URL(`${scheme}://${currentAuthority()}`).origin;
+      },
+    });
+
     let boundPort = preferredPort;
     let registeredOrigin: string | undefined;
     let url: string | undefined;
@@ -220,11 +244,6 @@ export class LocalControlService {
         options.target,
       );
 
-      // The fallback port is known only once Node emits `listening`. `listen`
-      // invokes this callback synchronously inside that event before it
-      // resolves, so the listener is re-tagged and the CORS entry replaced
-      // before another I/O callback can observe the newly bound socket.
-      tagListener(server, { kind: 'local-control', authority, origin });
       if (registeredOrigin !== origin) {
         if (registeredOrigin) {
           this.#deps.originAllowlist.remove(CORS_KEY);
@@ -236,10 +255,10 @@ export class LocalControlService {
       url = nextUrl;
     };
 
-    // Tag and register the preferred endpoint BEFORE the socket accepts
-    // anything. Reversed, there is a window where the LAN listener is up but
-    // the pairing token is not yet valid — the phone's first request 401s and
-    // the user re-scans a QR that was never broken.
+    // Register the preferred endpoint BEFORE the socket accepts anything.
+    // Reversed, there is a window where the LAN listener is up but the pairing
+    // token/CORS origin are not yet valid — the phone's first request 401/403s
+    // and the user re-scans a QR that was never broken.
     configureBoundEndpoint(preferredPort);
     this.#deps.credentials.addPairingToken(token.id, token.secret);
 
@@ -254,6 +273,12 @@ export class LocalControlService {
         );
       } catch (error) {
         if (!isAddressInUseError(error) || preferredPort === 0) throw error;
+
+        // The rejected preferred origin is no longer an active endpoint. Drop
+        // it before asking the OS for a free port; the actual origin is added
+        // synchronously from the fallback listener's `listening` callback.
+        this.#deps.originAllowlist.remove(CORS_KEY);
+        registeredOrigin = undefined;
 
         // A primary daemon started with --port 0 may receive an ephemeral port
         // that is already in use on the LAN interface by an unrelated socket.
