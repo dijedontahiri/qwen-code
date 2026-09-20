@@ -10,6 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MutableOriginAllowlist } from '../auth.js';
 import { CredentialStore } from './credentials.js';
+import { listenerIdentityOfSocket } from './listener-identity.js';
 import { LocalControlService } from './service.js';
 
 const sleep = vi.hoisted(() => ({ release: vi.fn() }));
@@ -228,12 +229,12 @@ describe('LocalControlService', () => {
           authority: `127.0.0.1:${status.port}`,
         }),
       ).toBe(true);
-      expect(
-        credentials.verify(token, {
-          kind: 'local-control',
-          authority: `127.0.0.1:${busyPort}`,
-        }),
-      ).toBe(false);
+
+      const listener = listenerIdentityOfSocket({
+        server: attached[0],
+      } as unknown as Parameters<typeof listenerIdentityOfSocket>[0]);
+      expect(listener.authority).toBe(`127.0.0.1:${status.port}`);
+      expect(listener.origin).toBe(url.origin);
     } finally {
       await service.disable();
       await new Promise<void>((resolve) => blocker.close(() => resolve()));
