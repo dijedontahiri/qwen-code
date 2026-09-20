@@ -1,0 +1,232 @@
+name: Validate Feishu dispatch test isolation repair
+
+on:
+  push:
+    branches: [validation/12191-failure-isolation-20260920]
+    paths: [.github/workflows/repair-feishu-dispatch-test.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SOURCE_SHA: 3ec369460d5e667289e297961457dd259dba42a7
+      REPAIR_BRANCH: fix/feishu-dispatch-test-isolation-20260920
+      TEST_PATH: packages/channels/feishu/src/adapter.test.ts
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 3ec369460d5e667289e297961457dd259dba42a7
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - name: Install locked diagnostic prerequisites
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          node --version
+          npm --version
+          if node -e 'process.exit(require("./package.json").packageManager?.startsWith("pnpm@") ? 0 : 1)'; then
+            corepack pnpm install --frozen-lockfile
+          else
+            npm ci --no-audit --no-fund
+          fi
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Prove the original test depends on network timing
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path(os.environ['TEST_PATH'])
+          s = p.read_text()
+          needle = "  it('dispatches both media and ordinary text', async () => {\n"
+          assert s.count(needle) == 1
+          s = s.replace(needle, needle + "    vi.spyOn(global, 'fetch').mockImplementation(() => new Promise<Response>(() => {}));\n", 1)
+          p.write_text(s)
+          PY
+          set +e
+          (cd packages/channels/feishu && ../../../node_modules/.bin/vitest run src/adapter.test.ts -t 'dispatches both media and ordinary text' --reporter=verbose) > "$RUNNER_TEMP/negative.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/negative.log"
+          git restore --source="$SOURCE_SHA" -- "$TEST_PATH"
+          test "$result" -ne 0
+          grep -Eq 'AssertionError|to be called|to have been called' "$RUNNER_TEMP/negative.log"
+          grep -q 'dispatches both media and ordinary text' "$RUNNER_TEMP/negative.log"
+          echo 'Expected failure observed with a deliberately unresolved network request. This is an isolated test-environment control, not a production failure.'
+      - name: Apply only the bounded test-fixture repair
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path(os.environ['TEST_PATH'])
+          s = p.read_text()
+          imp = "import { mkdtempSync, rmSync } from 'node:fs';"
+          assert s.count(imp) == 1
+          s = s.replace(imp, "import { mkdtempSync, readFileSync, rmSync } from 'node:fs';", 1)
+          start = "  it('dispatches both media and ordinary text', async () => {\n"
+          end = "\n  it('preserves text after platform-normalized mentions with spaced names'"
+          assert s.count(start) == 1 and s.count(end) == 1
+          a, b = s.index(start), s.index(end)
+          assert 0 < b - a < 2000
+          replacement = '''  it('dispatches both media and ordinary text', async () => {
+            const dir = mkdtempSync(join(tmpdir(), 'feishu-dispatch-'));
+            const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+            const bridge = createMockBridge();
+            // Output-card delivery is covered separately; keep this inbound test
+            // focused while exercising the real media download and dispatch path.
+            const channel = new ObservedContactFeishuChannel(
+              'test',
+              createConfig({ cwd: dir }),
+              bridge,
+            );
+            Object.assign(channel as unknown as Record<string, unknown>, {
+              tokenCache: { token: 'test_token', expiresAt: Date.now() + 3_600_000 },
+            });
+            const image = Buffer.from(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jA5sAAAAASUVORK5CYII=',
+              'base64',
+            );
+            const unexpectedRequests: string[] = [];
+            const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation((input) => {
+              const url = String(input);
+              if (url.includes('/im/v1/messages/media-image/resources/img_1?type=image')) {
+                return Promise.resolve(new Response(image, {
+                  headers: { 'Content-Type': 'image/png' },
+                }));
+              }
+              if (url.includes('/contact/v3/users/ou_user?')) {
+                return Promise.resolve(jsonResponse({
+                  code: 0,
+                  data: { user: { name: 'Test User' } },
+                }));
+              }
+              unexpectedRequests.push(url);
+              return Promise.reject(new Error(`Unexpected test request: ${url}`));
+            });
+            const inboundSpy = vi.spyOn(
+              channel as unknown as { handleInbound: (message: unknown) => Promise<void> },
+              'handleInbound',
+            );
+            const onMessage = getPrivateMethod<(data: unknown) => void>(
+              channel,
+              'onMessage',
+            ).bind(channel);
+            const event = (
+              messageId: string,
+              messageType: string,
+              content: Record<string, unknown>,
+            ) => ({
+              message: {
+                message_id: messageId,
+                chat_id: 'oc_dm',
+                chat_type: 'p2p',
+                message_type: messageType,
+                content: JSON.stringify(content),
+              },
+              sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+            });
+
+            try {
+              onMessage(event('media-image', 'image', { image_key: 'img_1' }));
+              await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+              expect(inboundSpy).toHaveBeenCalledTimes(1);
+              await inboundSpy.mock.results[0]?.value;
+              expect(readFileSync(join(dir, '.qwen', 'medias', 'img_1.png'))).toEqual(image);
+              expect(fetchSpy.mock.calls.filter(([input]) => String(input).includes('/resources/img_1?'))).toHaveLength(1);
+
+              onMessage(event('plain-text', 'text', { text: 'inspect this' }));
+              await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+              expect(inboundSpy).toHaveBeenCalledTimes(2);
+              await inboundSpy.mock.results[1]?.value;
+              expect(unexpectedRequests).toEqual([]);
+            } finally {
+              // Drain inbound work before restoring process-wide mocks so it
+              // cannot issue requests against a later test's fetch fixture.
+              await Promise.allSettled(inboundSpy.mock.results.map((result) => result.value));
+              channel.disconnect();
+              inboundSpy.mockRestore();
+              fetchSpy.mockRestore();
+              cwdSpy.mockRestore();
+              rmSync(dir, { recursive: true, force: true });
+            }
+          });
+          '''
+          import textwrap
+          replacement = textwrap.dedent(replacement)
+          # The formatter below restores the repository's indentation.
+          p.write_text(s[:a] + replacement + s[b:])
+          PY
+          node_modules/.bin/prettier --write "$TEST_PATH"
+          git diff --check
+          git diff --stat
+      - name: Validate formatting and lint of the repaired test
+        run: |
+          set -euo pipefail
+          node_modules/.bin/prettier --check "$TEST_PATH"
+          node_modules/.bin/eslint "$TEST_PATH" --max-warnings=0
+      - name: Run full Feishu suite three times on the same patched source
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "=== Feishu suite attempt $attempt ==="
+            (cd packages/channels/feishu && ../../../node_modules/.bin/vitest run --reporter=dot) > "$RUNNER_TEMP/feishu-$attempt.log" 2>&1 || { tail -100 "$RUNNER_TEMP/feishu-$attempt.log"; exit 1; }
+            tail -12 "$RUNNER_TEMP/feishu-$attempt.log"
+            test -z "$(git ls-files --others --exclude-standard)"
+          done
+      - name: Verify exact one-file repair and preserve evidence
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git diff --name-only)" = "$TEST_PATH"
+          git diff --cached --exit-code
+          git diff --check
+          test -z "$(git ls-files --others --exclude-standard)"
+          git diff --numstat
+          git diff -- "$TEST_PATH"
+          git hash-object "$TEST_PATH" > "$RUNNER_TEMP/validated-blob"
+          echo "Validated content blob: $(cat "$RUNNER_TEMP/validated-blob")"
+      - name: Save only validated bytes to the isolated repair branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, pathlib, urllib.parse, urllib.request
+          repo = 'dijedontahiri/qwen-code'
+          branch = os.environ['REPAIR_BRANCH']
+          source = os.environ['SOURCE_SHA']
+          path = os.environ['TEST_PATH']
+          def api(endpoint, data=None):
+              req = urllib.request.Request('https://api.github.com/repos/' + repo + endpoint,
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'},
+                  method='GET' if data is None else 'PUT')
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+          current = api('/git/ref/heads/' + branch)['object']['sha']
+          assert current == source, 'Repair branch changed; do not overwrite concurrent work'
+          existing = api('/contents/' + path + '?ref=' + urllib.parse.quote(branch, safe=''))
+          content = pathlib.Path(path).read_bytes()
+          result = api('/contents/' + path, {
+              'message': 'test(feishu): isolate media dispatch network and filesystem fixtures',
+              'branch': branch, 'sha': existing['sha'],
+              'content': base64.b64encode(content).decode(),
+          })
+          expected = pathlib.Path(os.environ['RUNNER_TEMP'] + '/validated-blob').read_text().strip()
+          assert result['content']['sha'] == expected, 'Saved bytes differ from validated content'
+          print('VALIDATED_REPAIR_COMMIT=' + result['commit']['sha'])
+          print('VALIDATED_REPAIR_BLOB=' + expected)
+          print('Saved to isolated fork branch only; no upstream PR or product branch was changed.')
+          PY
