@@ -59,11 +59,10 @@ export const BRAND_ROUTE_PROXY = '^/brand/?$';
 // bridge hangs in `connecting`.
 export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
 
-// Shared with vite.lib.config.ts so app and library builds do not drift onto
-// different syntax floors. The app still bundles xterm, whose logical
-// assignments esbuild miscompiles below ES2021 (#11643). Library entries
-// externalize declared runtime packages, but share the floor to keep public
-// output and future bundling changes aligned.
+// Shared with vite.lib.config.ts so the app and lib builds can never drift
+// onto different syntax floors: esbuild miscompiles xterm's logical
+// assignments below ES2021 (#11643), and the lib build bundles the same
+// xterm for npm hosts.
 export const WEB_SHELL_BUILD_TARGET = 'es2021';
 
 // Development permits same-origin ancestors; production denies them by default.
@@ -143,6 +142,13 @@ export default defineConfig(({ command }) => ({
     target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
+    // The Live Voice capture worklet is loaded with audioWorklet.addModule(),
+    // which the Web Shell CSP (`script-src 'self'`, no `data:`) only allows
+    // from a same-origin URL. At ~2 KB it is under Vite's default inline
+    // limit and would be turned into a `data:` URL — silently, because the
+    // client then falls back to the main-thread capture node. Keep it a file.
+    assetsInlineLimit: (filePath) =>
+      /[\\/]live[\\/]capture-worklet\.js$/.test(filePath) ? false : undefined,
     rollupOptions: {
       input: {
         index: resolve(__dirname, 'client/index.html'),
