@@ -1,0 +1,83 @@
+name: Prepare issue 12230 current-main candidate
+
+on:
+  push:
+    branches:
+      - automation/12230-finalizer-20260921
+    paths:
+      - .github/workflows/maintenance-12230-reconcile-r3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+      - name: Build exact current-main product branch
+        env:
+          OLD_BASE: eceaede18ea5c37404b79974c6d4833c12c23935
+          OLD_PRODUCT: 132af78eba065ddf107f4c95aca897094cd021f3
+          UPSTREAM_SHA: 1ac097163389b7b85b21bf74c396052fc2fcc59f
+          PRODUCT_BRANCH: fix/12230-live-journal-settlement-r3
+        shell: bash
+        run: |
+          set -euo pipefail
+          target1=packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx
+          target2=packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+
+          git fetch origin "$OLD_BASE" "$OLD_PRODUCT"
+          git fetch https://github.com/QwenLM/qwen-code.git "$UPSTREAM_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$UPSTREAM_SHA"
+
+          # The issue-scoped files must not have drifted since the reproduced baseline.
+          test -z "$(git diff --name-only "$OLD_BASE" "$UPSTREAM_SHA" -- "$target1" "$target2")"
+
+          patch="$RUNNER_TEMP/12230.patch"
+          git diff --binary "$OLD_BASE" "$OLD_PRODUCT" -- "$target1" "$target2" > "$patch"
+          test -s "$patch"
+
+          git checkout --detach "$UPSTREAM_SHA"
+          git apply --index "$patch"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx')
+          text = path.read_text()
+          marker = "  it('withholds the live settlement while a journal repair targets the same prompt', async () => {"
+          before, body = text.split(marker, 1)
+          old = "    sdkMocks.MockDaemonSessionClient.load\n"
+          new = "    sdkMocks.sessions.push(initialSession);\n    sdkMocks.MockDaemonSessionClient.load\n"
+          assert body.count(old) == 1, body.count(old)
+          body = body.replace(old, new, 1)
+          path.write_text(before + marker + body)
+          PY
+
+          git add "$target2"
+          expected=$'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx\npackages/web-shell/client/daemon/session/DaemonSessionProvider.tsx'
+          test "$(git diff --cached --name-only | sort)" = "$expected"
+          git diff --cached --check
+
+          # The only delta from the prior immutable product is the harness seed that
+          # lets renderWithProvider derive its default controlled session id.
+          git diff --no-ext-diff "$OLD_PRODUCT" -- "$target1" > "$RUNNER_TEMP/production-delta.txt"
+          test ! -s "$RUNNER_TEMP/production-delta.txt"
+
+          git config user.name "OpenAI automation"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix(web-shell): preserve settlement through journal repair"
+          candidate=$(git rev-parse HEAD)
+          test "$(git rev-parse HEAD^)" = "$UPSTREAM_SHA"
+
+          if git ls-remote --exit-code --heads origin "$PRODUCT_BRANCH" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing product branch" >&2
+            exit 1
+          fi
+          git push origin HEAD:"$PRODUCT_BRANCH"
+          echo "candidate=$candidate"
