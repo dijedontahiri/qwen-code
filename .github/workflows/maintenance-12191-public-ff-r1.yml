@@ -1,0 +1,60 @@
+name: Verify PR 12191 fast-forward reconciliation
+on:
+  push:
+    branches: [validation/12191-public-ff-r1]
+    paths: [.github/workflows/maintenance-12191-public-ff-r1.yml]
+permissions:
+  contents: read
+jobs:
+  merge-tree-identity:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PUBLIC_HEAD: 3ec369460d5e667289e297961457dd259dba42a7
+      FF_CANDIDATE: 37d360233b6e120012efe6f1f30e56c050cefd07
+      UPSTREAM_BASE: 17b5c940a6fd069515ec017e43b59d218b4dfd8d
+      R6_SOURCE: 4b809d4d8c941e0b482f6c4829745522521acd1b
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 37d360233b6e120012efe6f1f30e56c050cefd07
+          fetch-depth: 100
+          persist-credentials: false
+      - name: Verify fast-forward parent and exact current-main merge tree
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FF_CANDIDATE"
+          test "$(git rev-parse HEAD^)" = "$PUBLIC_HEAD"
+          git fetch --no-tags --depth=100 https://github.com/QwenLM/qwen-code.git "$UPSTREAM_BASE"
+          git fetch --no-tags --depth=100 https://github.com/dijedontahiri/qwen-code.git "$R6_SOURCE"
+          test "$(git rev-parse "$R6_SOURCE^")" = "$UPSTREAM_BASE"
+
+          mapfile -t ff_changed < <(git diff --name-only "$PUBLIC_HEAD" "$FF_CANDIDATE")
+          test "${#ff_changed[@]}" -eq 4
+          printf '%s\n' "${ff_changed[@]}" | sort > "$RUNNER_TEMP/ff-actual.txt"
+          printf '%s\n' \
+            packages/web-shell/package.json \
+            packages/web-shell/scripts/verify-publish-artifacts.mjs \
+            packages/web-shell/vite.config.ts \
+            packages/web-shell/vite.lib.config.ts | sort > "$RUNNER_TEMP/ff-expected.txt"
+          diff -u "$RUNNER_TEMP/ff-expected.txt" "$RUNNER_TEMP/ff-actual.txt"
+
+          set +e
+          merge_output="$(git merge-tree --write-tree "$UPSTREAM_BASE" "$FF_CANDIDATE" 2>&1)"
+          merge_rc=$?
+          set -e
+          printf '%s\n' "$merge_output"
+          test "$merge_rc" -eq 0
+          merged_tree="$(printf '%s\n' "$merge_output" | head -n1)"
+          r6_tree="$(git rev-parse "$R6_SOURCE^{tree}")"
+          test "$merged_tree" = "$r6_tree"
+          git diff --exit-code "$merged_tree" "$r6_tree"
+
+          mapfile -t integrated_changed < <(git diff --name-only "$UPSTREAM_BASE" "$R6_SOURCE")
+          test "${#integrated_changed[@]}" -eq 11
+          printf '%s\n' "${integrated_changed[@]}"
+
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
