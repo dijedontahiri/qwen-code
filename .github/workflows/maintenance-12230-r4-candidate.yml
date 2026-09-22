@@ -1,0 +1,159 @@
+name: Validate issue 12230 R4 candidate
+
+on:
+  push:
+    branches:
+      - validation/12230-r4-candidate
+    paths:
+      - .github/workflows/maintenance-12230-r4-candidate.yml
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BASE_SHA: c650a3e4dcec12e11b8966532ba64d8005f8a676
+      OLD_BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+      OLD_PRODUCT_SHA: 132af78eba065ddf107f4c95aca897094cd021f3
+      TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
+      PROD_FILE: packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx
+      TEST_FILE: packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QwenLM/qwen-code
+          ref: c650a3e4dcec12e11b8966532ba64d8005f8a676
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify immutable source identity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test -z "$(git status --short)"
+          node -e "const p=require('./package.json'); if (p.packageManager !== 'pnpm@11.24.0') throw new Error('unexpected packageManager '+p.packageManager)"
+      - name: Install locked dependencies and build workspace
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only 2>&1 | tee "$RUNNER_TEMP/install.log"
+          npm run build 2>&1 | tee "$RUNNER_TEMP/build.log"
+          git restore --source=HEAD --staged --worktree .
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test -z "$(git status --short)"
+      - name: Apply the recovered product diff and repair the test harness
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=3 https://github.com/dijedontahiri/qwen-code.git \
+            refs/heads/fix/12230-live-journal-settlement-r3:refs/remotes/recovered/product
+          test "$(git rev-parse refs/remotes/recovered/product)" = "$OLD_PRODUCT_SHA"
+          git cat-file -e "$OLD_BASE_SHA^{commit}"
+          git diff --binary "$OLD_BASE_SHA" "$OLD_PRODUCT_SHA" -- "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/recovered.patch"
+          test -s "$RUNNER_TEMP/recovered.patch"
+          git apply --check "$RUNNER_TEMP/recovered.patch"
+          git apply "$RUNNER_TEMP/recovered.patch"
+          node <<'NODE'
+          const fs = require('fs');
+          const p = process.env.TEST_FILE;
+          let s = fs.readFileSync(p, 'utf8');
+          const title = "it('withholds the live settlement while a journal repair targets the same prompt'";
+          const start = s.indexOf(title);
+          if (start < 0) throw new Error('named regression not found');
+          const end = s.indexOf("\n  it('", start + title.length);
+          if (end < 0) throw new Error('next test boundary not found');
+          let block = s.slice(start, end);
+          const old = '    await renderWithProvider(<Harness />, { autoConnect: true });';
+          const count = block.split(old).length - 1;
+          if (count !== 1) throw new Error(`expected one render anchor in regression, got ${count}`);
+          const replacement = [
+            '    await renderWithProvider(<Harness />, {',
+            '      autoConnect: true,',
+            '      sessionId: initialSession.sessionId,',
+            '    });',
+          ].join('\n');
+          block = block.replace(old, replacement);
+          s = s.slice(0, start) + block + s.slice(end);
+          fs.writeFileSync(p, s);
+          NODE
+          git diff --check
+          mapfile -t changed < <(git diff --name-only)
+          printf '%s\n' "${changed[@]}"
+          test "${#changed[@]}" -eq 2
+          test "${changed[0]}" = "$TEST_FILE" || test "${changed[1]}" = "$TEST_FILE"
+          test "${changed[0]}" = "$PROD_FILE" || test "${changed[1]}" = "$PROD_FILE"
+          git diff --binary -- "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/candidate.patch"
+          sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/candidate-sha256.txt"
+      - name: Run named regression
+        run: |
+          set -euo pipefail
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME") 2>&1 | tee "$RUNNER_TEMP/named-regression.log"
+          grep -F '1 passed' "$RUNNER_TEMP/named-regression.log"
+          ! grep -F '1 failed' "$RUNNER_TEMP/named-regression.log"
+      - name: Run complete affected test file
+        run: |
+          set -euo pipefail
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx) 2>&1 | tee "$RUNNER_TEMP/affected-file.log"
+          grep -F 'Test Files  1 passed' "$RUNNER_TEMP/affected-file.log"
+          ! grep -F 'failed' "$RUNNER_TEMP/affected-file.log"
+      - name: Run Web Shell type lint and format checks
+        run: |
+          set -euo pipefail
+          (cd packages/web-shell && npm run typecheck) 2>&1 | tee "$RUNNER_TEMP/typecheck.log"
+          (cd packages/web-shell && npm run lint) 2>&1 | tee "$RUNNER_TEMP/lint.log"
+          (cd packages/web-shell && npm run format:check) 2>&1 | tee "$RUNNER_TEMP/format.log"
+      - name: Verify exact candidate scope before repository preflight
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          git diff --check
+          mapfile -t changed < <(git diff --name-only)
+          printf '%s\n' "${changed[@]}"
+          test "${#changed[@]}" -eq 2
+          printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
+          printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
+          test -z "$(git diff --cached --name-only)"
+      - name: Run literal repository preflight
+        run: |
+          set -euo pipefail
+          npm run preflight 2>&1 | tee "$RUNNER_TEMP/preflight.log"
+      - name: Final immutable source and residue audit
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          git diff --check
+          mapfile -t changed < <(git diff --name-only)
+          printf '%s\n' "${changed[@]}"
+          test "${#changed[@]}" -eq 2
+          printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
+          printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
+          test -z "$(git diff --cached --name-only)"
+          sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/final-sha256.txt"
+          diff -u "$RUNNER_TEMP/candidate-sha256.txt" "$RUNNER_TEMP/final-sha256.txt"
+      - name: Upload candidate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-12230-r4-candidate
+          path: |
+            ${{ runner.temp }}/candidate.patch
+            ${{ runner.temp }}/candidate-sha256.txt
+            ${{ runner.temp }}/final-sha256.txt
+            ${{ runner.temp }}/install.log
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/named-regression.log
+            ${{ runner.temp }}/affected-file.log
+            ${{ runner.temp }}/typecheck.log
+            ${{ runner.temp }}/lint.log
+            ${{ runner.temp }}/format.log
+            ${{ runner.temp }}/preflight.log
+          if-no-files-found: ignore
+          retention-days: 7
