@@ -1,28 +1,36 @@
-name: Validate issue 12290 untyped MCP image sniffing
+name: Validate issue 12290 current-main MCP resource sniffing
+
 on:
   push:
     branches: [validation/12290-untyped-resource-image]
     paths: [.github/workflows/maintenance-12290-untyped-resource-image.yml]
+
 permissions:
-  contents: read
+  contents: write
+
 jobs:
-  focused-candidate:
+  validate-and-publish-candidate:
     if: github.repository == 'dijedontahiri/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 80
+    timeout-minutes: 120
     env:
-      BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
+      BASE_SHA: a64d8decc1a9cee3c93d265f6ade5756f54b6a21
+      PRODUCT_BRANCH: fix/12290-untyped-resource-image
       TARGET_TEST: sniffs an untyped embedded PNG ResourceBlock
       TEST_B64: ICAgIGl0KCdzbmlmZnMgYW4gdW50eXBlZCBlbWJlZGRlZCBQTkcgUmVzb3VyY2VCbG9jaycsIGFzeW5jICgpID0+IHsKICAgICAgY29uc3QgcGFyYW1zID0geyBwYXJhbTogJ2dldCcgfTsKICAgICAgY29uc3QgcG5nU2lnbmF0dXJlID0gJ2lWQk9SdzBLR2dvPSc7CiAgICAgIGNvbnN0IHNka1Jlc3BvbnNlOiBQYXJ0W10gPSBbCiAgICAgICAgewogICAgICAgICAgZnVuY3Rpb25SZXNwb25zZTogewogICAgICAgICAgICBuYW1lOiBzZXJ2ZXJUb29sTmFtZSwKICAgICAgICAgICAgcmVzcG9uc2U6IHsKICAgICAgICAgICAgICBjb250ZW50OiBbCiAgICAgICAgICAgICAgICB7CiAgICAgICAgICAgICAgICAgIHR5cGU6ICdyZXNvdXJjZScsCiAgICAgICAgICAgICAgICAgIHJlc291cmNlOiB7CiAgICAgICAgICAgICAgICAgICAgdXJpOiAnZmlsZTovLy9wYXRoL3RvL2ltYWdlLmJpbicsCiAgICAgICAgICAgICAgICAgICAgYmxvYjogcG5nU2lnbmF0dXJlLAogICAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICBdLAogICAgICAgICAgICB9LAogICAgICAgICAgfSwKICAgICAgICB9LAogICAgICBdOwogICAgICBtb2NrQ2FsbFRvb2wubW9ja1Jlc29sdmVkVmFsdWUoc2RrUmVzcG9uc2UpOwoKICAgICAgY29uc3QgaW52b2NhdGlvbiA9IHRvb2wuYnVpbGQocGFyYW1zKTsKICAgICAgY29uc3QgdG9vbFJlc3VsdCA9IGF3YWl0IGludm9jYXRpb24uZXhlY3V0ZShuZXcgQWJvcnRDb250cm9sbGVyKCkuc2lnbmFsKTsKCiAgICAgIGV4cGVjdCh0b29sUmVzdWx0LmxsbUNvbnRlbnQpLnRvRXF1YWwoWwogICAgICAgIHsKICAgICAgICAgIHRleHQ6IGBbVG9vbCAnJHtzZXJ2ZXJUb29sTmFtZX0nIHByb3ZpZGVkIHRoZSBmb2xsb3dpbmcgZW1iZWRkZWQgcmVzb3VyY2Ugd2l0aCBtaW1lLXR5cGU6IGltYWdlL3BuZ11gLAogICAgICAgIH0sCiAgICAgICAgewogICAgICAgICAgaW5saW5lRGF0YTogewogICAgICAgICAgICBtaW1lVHlwZTogJ2ltYWdlL3BuZycsCiAgICAgICAgICAgIGRhdGE6IHBuZ1NpZ25hdHVyZSwKICAgICAgICAgIH0sCiAgICAgICAgfSwKICAgICAgXSk7CiAgICAgIGV4cGVjdCh0b29sUmVzdWx0LnJldHVybkRpc3BsYXkpLnRvQmUoCiAgICAgICAgYFtUb29sICcke3NlcnZlclRvb2xOYW1lfScgcHJvdmlkZWQgdGhlIGZvbGxvd2luZyBlbWJlZGRlZCByZXNvdXJjZSB3aXRoIG1pbWUtdHlwZTogaW1hZ2UvcG5nXVxuW2ltYWdlL3BuZ11gLAogICAgICApOwogICAgfSk7Cgo=
-      PROD_B64: ICBpZiAocmVzb3VyY2U/LmJsb2IpIHsKICAgIGxldCBtaW1lVHlwZSA9IHJlc291cmNlLm1pbWVUeXBlOwogICAgaWYgKCFtaW1lVHlwZSkgewogICAgICAvLyBEZWNvZGUgb25seSB0aGUgYWxpZ25lZCBwcmVmaXggbmVlZGVkIGJ5IHRoZSBleGlzdGluZyBtYWdpYy1ieXRlCiAgICAgIC8vIHNuaWZmZXI7IGRvIG5vdCBhbGxvY2F0ZSB0aGUgd2hvbGUgdW50cnVzdGVkIE1DUCBwYXlsb2FkIGp1c3QgdG8KICAgICAgLy8gZGV0ZXJtaW5lIHdoZXRoZXIgYW4gb3RoZXJ3aXNlLXVudHlwZWQgcmVzb3VyY2UgaXMgYSBtb2RlbC1zYWZlIGltYWdlLgogICAgICBjb25zdCBraW5kID0gc25pZmZGaWxlS2luZCgKICAgICAgICBCdWZmZXIuZnJvbShyZXNvdXJjZS5ibG9iLnNsaWNlKDAsIDI0KSwgJ2Jhc2U2NCcpLAogICAgICAgICcnLAogICAgICAgICcnLAogICAgICAgICcnLAogICAgICApOwogICAgICBpZiAoCiAgICAgICAga2luZC5tYWdpY01hdGNoZWQgJiYKICAgICAgICBbJ2ltYWdlL2pwZWcnLCAnaW1hZ2UvcG5nJywgJ2ltYWdlL3dlYnAnXS5pbmNsdWRlcyhraW5kLm1pbWVUeXBlKQogICAgICApIHsKICAgICAgICBtaW1lVHlwZSA9IGtpbmQubWltZVR5cGU7CiAgICAgIH0KICAgIH0KICAgIG1pbWVUeXBlIHx8PSAnYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtJzsKICAgIHJldHVybiBbCg==
+      PROD_B64: ICBpZiAocmVzb3VyY2U/LmJsb2IpIHsKICAgIGxldCBtaW1lVHlwZSA9IHJlc291cmNlLm1pbWVUeXBlOwogICAgaWYgKCFtaW1lVHlwZSkgewogICAgICBjb25zdCBraW5kID0gc25pZmZGaWxlS2luZCgKICAgICAgICBCdWZmZXIuZnJvbShyZXNvdXJjZS5ibG9iLnNsaWNlKDAsIDI0KSwgJ2Jhc2U2NCcpLAogICAgICAgICcnLAogICAgICAgICcnLAogICAgICAgICcnLAogICAgICApOwogICAgICBpZiAoCiAgICAgICAga2luZC5tYWdpY01hdGNoZWQgJiYKICAgICAgICBbJ2ltYWdlL2pwZWcnLCAnaW1hZ2UvcG5nJywgJ2ltYWdlL3dlYnAnXS5pbmNsdWRlcyhraW5kLm1pbWVUeXBlKQogICAgICApIHsKICAgICAgICBtaW1lVHlwZSA9IGtpbmQubWltZVR5cGU7CiAgICAgIH0KICAgIH0KICAgIG1pbWVUeXBlIHx8PSAnYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtJzsKICAgIHJldHVybiBbCg==
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: eceaede18ea5c37404b79974c6d4833c12c23935
+          repository: QwenLM/qwen-code
+          ref: a64d8decc1a9cee3c93d265f6ade5756f54b6a21
           persist-credentials: false
+          fetch-depth: 1
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 22.16.0
+
       - name: Verify immutable baseline and environment
         run: |
           set -euo pipefail
@@ -33,18 +41,20 @@ jobs:
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
+
       - name: Install locked dependencies and build workspace dependencies
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |
           set -euo pipefail
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -120 "$RUNNER_TEMP/install.log"; exit 1; }
-          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -160 "$RUNNER_TEMP/build.log"; exit 1; }
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only | tee "$RUNNER_TEMP/install.log"
+          npm run build | tee "$RUNNER_TEMP/build.log"
           git restore --source=HEAD --staged --worktree .
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
-      - name: Prove intended baseline assertion fails
+
+      - name: Prove intended current-main baseline assertion fails
         run: |
           set -euo pipefail
           cp packages/core/src/tools/mcp-tool.test.ts "$RUNNER_TEMP/mcp-tool.test.ts"
@@ -65,12 +75,13 @@ jobs:
           cat "$RUNNER_TEMP/baseline.log"
           test "$rc" -ne 0
           grep -F "$TARGET_TEST" "$RUNNER_TEMP/baseline.log"
-          grep -F "application/octet-stream" "$RUNNER_TEMP/baseline.log"
+          grep -F '"mimeType": "application/octet-stream"' "$RUNNER_TEMP/baseline.log"
           cp "$RUNNER_TEMP/mcp-tool.test.ts" packages/core/src/tools/mcp-tool.test.ts
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
-      - name: Apply minimal candidate repair
+
+      - name: Apply minimal issue 12290 candidate
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -78,7 +89,7 @@ jobs:
           from pathlib import Path
           p = Path('packages/core/src/tools/mcp-tool.ts')
           s = p.read_text()
-          anchor = "import { buildMcpClassifierInput } from './mcp-classifier-input.js';\n"
+          anchor = "import { safeJsonStringify } from '../utils/safeJsonStringify.js';\n"
           addition = "import { sniffFileKind } from '../utils/binary-content.js';\n"
           assert s.count(anchor) == 1, s.count(anchor)
           s = s.replace(anchor, anchor + addition, 1)
@@ -86,6 +97,7 @@ jobs:
           new = base64.b64decode(os.environ['PROD_B64']).decode()
           assert s.count(old) == 1, s.count(old)
           p.write_text(s.replace(old, new, 1))
+
           p = Path('packages/core/src/tools/mcp-tool.test.ts')
           s = p.read_text()
           anchor = "    it('should handle a mix of content block types', async () => {\n"
@@ -95,44 +107,63 @@ jobs:
           PY
           git diff --check
           git diff -- packages/core/src/tools/mcp-tool.ts packages/core/src/tools/mcp-tool.test.ts
+
       - name: Run candidate focused and file regressions
         run: |
           set -euo pipefail
           (cd packages/core && NO_COLOR=1 npm run test:ci -- --retry=0 src/tools/mcp-tool.test.ts -t "$TARGET_TEST") | tee "$RUNNER_TEMP/candidate-focused.log"
           grep -F "$TARGET_TEST" "$RUNNER_TEMP/candidate-focused.log"
-          grep -E '1 passed|passed' "$RUNNER_TEMP/candidate-focused.log"
+          grep -E 'Tests +1 passed' "$RUNNER_TEMP/candidate-focused.log"
           (cd packages/core && NO_COLOR=1 npm run test:ci -- --retry=0 src/tools/mcp-tool.test.ts) | tee "$RUNNER_TEMP/candidate-file.log"
-          grep -E '[0-9]+ passed' "$RUNNER_TEMP/candidate-file.log"
+          grep -E 'Test Files +1 passed' "$RUNNER_TEMP/candidate-file.log"
+          grep -E 'Tests +[0-9]+ passed' "$RUNNER_TEMP/candidate-file.log"
+
       - name: Run candidate Core quality gates
         run: |
           set -euo pipefail
-          npm run typecheck --workspace=@qwen-code/core
-          npm run lint --workspace=@qwen-code/core > "$RUNNER_TEMP/lint.log" 2>&1 || { tail -120 "$RUNNER_TEMP/lint.log"; exit 1; }
+          (cd packages/core && npm run typecheck)
+          (cd packages/core && npm run lint) | tee "$RUNNER_TEMP/core-lint.log"
           printf '%s\0' packages/core/src/tools/mcp-tool.ts packages/core/src/tools/mcp-tool.test.ts | xargs -0 node_modules/.bin/prettier --check
           git diff --check
           git diff --name-only "$BASE_SHA" -- | sort | tee "$RUNNER_TEMP/changed.txt"
           test "$(wc -l < "$RUNNER_TEMP/changed.txt")" -eq 2
           grep -Fx 'packages/core/src/tools/mcp-tool.test.ts' "$RUNNER_TEMP/changed.txt"
           grep -Fx 'packages/core/src/tools/mcp-tool.ts' "$RUNNER_TEMP/changed.txt"
-      - name: Capture candidate files
+
+      - name: Run literal repository preflight
         run: |
           set -euo pipefail
-          git diff --binary "$BASE_SHA" -- packages/core/src/tools/mcp-tool.ts packages/core/src/tools/mcp-tool.test.ts > "$RUNNER_TEMP/candidate.diff"
-          test -s "$RUNNER_TEMP/candidate.diff"
-      - name: Upload candidate files
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: issue-12290-candidate-files
-          retention-days: 1
-          if-no-files-found: error
-          path: |
-            packages/core/src/tools/mcp-tool.ts
-            packages/core/src/tools/mcp-tool.test.ts
-            ${{ runner.temp }}/candidate.diff
-      - name: Report candidate diff state
-        if: always()
+          npm run preflight | tee "$RUNNER_TEMP/preflight.log"
+
+      - name: Final diff and source audit
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
-          git status --short
-          git diff --check || true
+          git diff --check
+          git diff --name-only "$BASE_SHA" -- | sort | tee "$RUNNER_TEMP/final-changed.txt"
+          test "$(wc -l < "$RUNNER_TEMP/final-changed.txt")" -eq 2
+          grep -Fx 'packages/core/src/tools/mcp-tool.test.ts' "$RUNNER_TEMP/final-changed.txt"
+          grep -Fx 'packages/core/src/tools/mcp-tool.ts' "$RUNNER_TEMP/final-changed.txt"
+          git diff -- packages/core/src/tools/mcp-tool.ts packages/core/src/tools/mcp-tool.test.ts
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Commit and push the exact verified product tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code "https://github.com/dijedontahiri/qwen-code.git" "refs/heads/$PRODUCT_BRANCH" >/dev/null 2>&1; then
+            echo "Product branch already exists; refusing to overwrite it."
+            exit 1
+          fi
+          git config user.name 'Dijedon'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          git add packages/core/src/tools/mcp-tool.ts packages/core/src/tools/mcp-tool.test.ts
+          git diff --cached --check
+          git commit -m 'fix(core): sniff untyped MCP resource images'
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test -z "$(git status --porcelain)"
+          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/dijedontahiri/qwen-code.git"
+          git push fork "HEAD:refs/heads/$PRODUCT_BRANCH"
+          echo "PRODUCT_SHA=$(git rev-parse HEAD)"
+          echo "PRODUCT_TREE=$(git rev-parse HEAD^{tree})"
