@@ -102,7 +102,7 @@ jobs:
           set -euo pipefail
           (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx) 2>&1 | tee "$RUNNER_TEMP/affected-file.log"
           grep -F 'Test Files  1 passed' "$RUNNER_TEMP/affected-file.log"
-          ! grep -F 'failed' "$RUNNER_TEMP/affected-file.log"
+          grep -E 'Tests[[:space:]]+[0-9]+ passed \([0-9]+\)' "$RUNNER_TEMP/affected-file.log"
       - name: Run Web Shell type lint and format checks
         run: |
           set -euo pipefail
