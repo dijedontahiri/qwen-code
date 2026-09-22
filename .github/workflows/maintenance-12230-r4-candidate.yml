@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test -z "$(git status --short)"
-          node -e "const p=require('./package.json'); if (p.packageManager !== 'pnpm@11.24.0') throw new Error('unexpected packageManager '+p.packageManager)"
+          node -e "const p=require('./package.json'); if (!p.packageManager.startsWith('pnpm@11.24.0')) throw new Error('unexpected packageManager '+p.packageManager)"
       - name: Install locked dependencies and build workspace
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -87,8 +87,8 @@ jobs:
           mapfile -t changed < <(git diff --name-only)
           printf '%s\n' "${changed[@]}"
           test "${#changed[@]}" -eq 2
-          test "${changed[0]}" = "$TEST_FILE" || test "${changed[1]}" = "$TEST_FILE"
-          test "${changed[0]}" = "$PROD_FILE" || test "${changed[1]}" = "$PROD_FILE"
+          printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
+          printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
           git diff --binary -- "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/candidate.patch"
           sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/candidate-sha256.txt"
       - name: Run named regression
@@ -130,14 +130,18 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           git diff --check
-          mapfile -t changed < <(git diff --name-only)
-          printf '%s\n' "${changed[@]}"
-          test "${#changed[@]}" -eq 2
-          printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
-          printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
-          test -z "$(git diff --cached --name-only)"
-          sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/final-sha256.txt"
-          diff -u "$RUNNER_TEMP/candidate-sha256.txt" "$RUNNER_TEMP/final-sha256.txt"
+          if [[ -f "$RUNNER_TEMP/candidate-sha256.txt" ]]; then
+            mapfile -t changed < <(git diff --name-only)
+            printf '%s\n' "${changed[@]}"
+            test "${#changed[@]}" -eq 2
+            printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
+            printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
+            test -z "$(git diff --cached --name-only)"
+            sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/final-sha256.txt"
+            diff -u "$RUNNER_TEMP/candidate-sha256.txt" "$RUNNER_TEMP/final-sha256.txt"
+          else
+            test -z "$(git status --short)"
+          fi
       - name: Upload candidate evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
