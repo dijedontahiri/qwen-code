@@ -53,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=3 https://github.com/dijedontahiri/qwen-code.git \
-            refs/heads/fix/12230-live-journal-settlement-r3:refs/remotes/recovered/product
+            refs/heads/fix/12230-live-journal-settlement:refs/remotes/recovered/product
           test "$(git rev-parse refs/remotes/recovered/product)" = "$OLD_PRODUCT_SHA"
           git cat-file -e "$OLD_BASE_SHA^{commit}"
           git diff --binary "$OLD_BASE_SHA" "$OLD_PRODUCT_SHA" -- "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/recovered.patch"
