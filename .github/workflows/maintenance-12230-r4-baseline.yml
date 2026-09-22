@@ -1,0 +1,78 @@
+name: Validate issue 12230 R4 baseline
+
+on:
+  push:
+    branches:
+      - validation/12230-r4-baseline
+    paths:
+      - .github/workflows/maintenance-12230-r4-baseline.yml
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    if: github.repository == 'dijedontahiri/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BASE_SHA: c650a3e4dcec12e11b8966532ba64d8005f8a676
+      TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QwenLM/qwen-code
+          ref: c650a3e4dcec12e11b8966532ba64d8005f8a676
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.16.0
+      - name: Verify immutable baseline identity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test -z "$(git status --short)"
+      - name: Install and build prerequisites
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only > "$RUNNER_TEMP/install.log" 2>&1 || { tail -100 "$RUNNER_TEMP/install.log"; exit 1; }
+          npm run build
+          git restore --source=HEAD --staged --worktree .
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test -z "$(git status --short)"
+      - name: Prove desired post-repair settlement fails on baseline
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const p = 'packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx';
+          let s = fs.readFileSync(p, 'utf8');
+          const old = "    // Current behavior, not desired, pinned deliberately: the replay publish is\n    // gated on local admission and this prompt was never admitted, so the\n    // settlement the live path withheld is never re-published (#12230).\n    expect(settlements).toEqual([]);\n";
+          const desired = "    expect(settlements).toEqual([\n      {\n        sessionId: 'session-settle-repair',\n        promptId: 'prompt-live',\n        outcome: 'completed',\n        stopReason: 'end_turn',\n      },\n    ]);\n";
+          if (s.split(old).length !== 2) throw new Error('baseline oracle anchor mismatch');
+          fs.writeFileSync(p, s.replace(old, desired));
+          NODE
+          set +e
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME") > "$RUNNER_TEMP/baseline.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -F 'expected [] to deeply equal' "$RUNNER_TEMP/baseline.log"
+          grep -F '1 failed' "$RUNNER_TEMP/baseline.log"
+          git restore --source=HEAD --staged --worktree packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test -z "$(git status --short)"
+      - name: Upload baseline evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-12230-r4-baseline
+          path: |
+            ${{ runner.temp }}/install.log
+            ${{ runner.temp }}/baseline.log
+          if-no-files-found: ignore
+          retention-days: 7
