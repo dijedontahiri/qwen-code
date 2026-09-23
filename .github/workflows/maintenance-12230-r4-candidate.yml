@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      BASE_SHA: c650a3e4dcec12e11b8966532ba64d8005f8a676
+      BASE_SHA: 9f3acdb37def3048e1510ce79e4df6cc203d09ab
       OLD_BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
       OLD_PRODUCT_SHA: 132af78eba065ddf107f4c95aca897094cd021f3
       TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: QwenLM/qwen-code
-          ref: c650a3e4dcec12e11b8966532ba64d8005f8a676
+          ref: 9f3acdb37def3048e1510ce79e4df6cc203d09ab
           fetch-depth: 1
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
