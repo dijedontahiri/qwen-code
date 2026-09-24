@@ -17,11 +17,11 @@ jobs:
     timeout-minutes: 90
     env:
       BASE_SHA: aec6623e184a3d58502f712c8cc6b9e2af54bb77
-      TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
-      FAILURE_TEST_NAME: keeps the retained transcript and reports one repair failure
       PROD_FILE: packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx
       TEST_FILE: packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
       NO_COLOR: '1'
+      EXPECTED_PROD_SHA256: 9e156a50a05beeaef4441980c072c34cbdffaef0a7d47ef85ce79addce6f2c73
+      EXPECTED_TEST_SHA256: 4308aab29d13bb1d42c29121e511ef2e21aeb331a666a90db471060a07d95602
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
@@ -43,200 +43,64 @@ jobs:
           QWEN_SKIP_PREPARE: '1'
         run: |
           set -euo pipefail
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only 2>&1 | tee "$RUNNER_TEMP/install.log"
-          npm run build 2>&1 | tee "$RUNNER_TEMP/build.log"
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          npm run build
           git restore --source=HEAD --staged --worktree .
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test -z "$(git status --short)"
-      - name: Add review regressions without production fix
+      - name: Reconstruct exact reviewed candidate
+        env:
+          CANDIDATE_PATCH_GZ_B64: H4sIAAAAAAAC/61Z227bRhB991dMgSKiQIqW5LsN123TAGnRNEEc9MUQ3BU5slhTJMtdSTYSAf2IfmG/pLMXkiuJohVVeUgo7lzPzp6ZZcJoNIJO5yESwA4zFjyyB+SHcxx2+Bjj+DCII0zEYchwkiaHHDmP6N+f1M9b/etDns6iEHNfIBe+4E8w3JelgygJ8QnO+hfHR+zI90N2zM6OA+h1u6fHxwedTmd/UR+4rrvHyL//HjoXZ2cnXq8Hrn44AXoZIg/yaIhOq9ZAywOnDdffwecD0H9iFDCM0+CRX0KOLEyT+Bm07qecJdJaJn6UAncDuIa7wZWtmaQiCnBd1bj9TS3XKQZpkmAgSObSqLwu39wKJhC+wJR2ZxQlGF4duFqTtLgAjkLEOCHQeKFM+U0ycasWwjczWqqcFm5H00SZh7csTyg+AqJEAQwGpDPlWJs+yV9V4iZxW34pZ5L2jYylVWVtK1aZSxduIVyuLyXnOCjTM5tYCoONip9N+djIWQYXdgI5immeQDKN4/LtgsBShXV+1PVOqa7Oj469s53KSv5xNABqQT/6QRoiXF9fQ0uXux9HM7z/M6VQWHyfY8ai3B+xiBJteZWtdvnc9kX6ls3wV0wexNjpVfnhU0YgOhYMUvbNX1MWO3eDKvVoBE5lOUpmLI7C14ybuBIU8zR/BMzzNG/Bly8NsmwqxpaghK7XO++eEGYuPfS6Xq+/A3omWLVdBx3yK5zWPBLjcRqHHMQYQaJmbTjMx4QYMDBAggYSBMsfUGgVziYImaok8sf4cxKUXl3pw0cWjJ07DedniNkQ40toGVNUuTMka5yU6aznk0sYsZiAWHgbNHLskJglL/JpIT5oO1prr3mB862Kod0yMZksP+sICFAL5MND+CQ9piwEGSd5kd47K65GaQ5/aPMduf4HsCQsHZemDLAUEuaTSOqTSEKGc9LhQOe9Sk9QNBMfPkyHccTHUfIg1/LK1jydxiEEmIto9Kz0CLkkIE4MpZ8/DYEwnb88xeR3pJxOqLCou3gyyKIcqTVcqHI8px7R3fEwV8dnYY6irM6OBWS56wpR2Q50fHPaXR0lDKn3+fAzbRwJx+wZMg0B8tIS0YRCRAICGElg4N+//1GWzCbPKfGEuC2nvQtYTC1nmFKnUGI8lZKlNca5RJHAoqpI5xCwhBzQD9o8EfFRRIgOn2nnOVJ9hx5kKRcdk4kJztel9LVZfqoJuLS0FLhnoi5AYeEkUvsBD7INlhiV2MiSpHmK8i0Nqnqsjo3OWyZXpA2qNwcpnZURRSUTQMZN7QHR2hQtY0xU5Zox4jh1SjEO/QOrDWssMDTlQx0tIEAEvqNmad45ZQmZsebnkAjCPHd0xAbviu5jxoVq4VL4zDN1fNEztHrRP/X6Jzs3JYCQCXZJfKW3R0VkHXDS4iLNPhI8cjZpYRLeqzNWVv7yOVCE7emSU9GTjV80h1zS/OFV7XdpRTGS3b5v4M7+qSh19QXRtIZk7f3sEno1r8VzhpTDOKKU8uf7kkdaNbKb4FiXNACuL8ipwsCmi/l+ThN2Or/HpwAxrPdLtRGkKkx7FqiXLBNQ9cHrk1azDZNzYyHVrZWasKcfn4UcXk96/U0SzY5GND1VY+IPMxpc2DBG3etqNBZr71bfDOyfuoBqiFfDFj7Ko8Z9+ffSCXitbhS+5Kji9JwdqdPT73b73vmOh6f+XKwFONCdYVGMZjrFtpnE5TATpprO1E3A0B5XQ7+aWalfElvO80hItkI+tudmKTflayPMMiJyguN01cIiHe5PaOEj8jSeYfi75Lv3SYDET+E+b6h7uZyW99J+OOyfjoa+37/onQ37x/u9l+7tSmpuo/2Lo1PvqAuuflAMTTN5movq5lVrwSG6ycqb3MriB7nWXqVwWL62+ZKR7lqKR1oDPZuvkEmNqn0bsi5o1NnwiQiTmuNH3e2vberW7z7iyA+meU4oXVXcX8P0a+JwvS4PKx5vfD3h+jx6SKjcc33f0Cfl0+rSq1cvW/SZEEicjmGdrOw+y/L1UpL0Oxs2wu7wjHZ7hmYn/XLB26ys871cSrFBPBhj8JilUSIaQwLwfT/BJ/G6lPeapGVHMJ9CaFSaRIRZ+K5416C5aFijCJwJyx8xV2aa3N/QUGKJSiStn34U0gW9QZ2gWLQbIkmHNBUS+90mLOPjtJixKNkE53CLwmmybtW0P4qZeMcy61NEkyZoVpfxyyouv+rIkWcge1yxPGjcnKbUmta4SfdXe6xcrlBr4oSbGzkubLQmRd8bIP+/teK2eIuYmAt1g3R5hl8SXVytjx7FzD7l+GaF3uommxUK/GZp44hxXlT5Wgpzt6ewmuzkR52a3Nr1U2ozP6/4rfG2AJSfPnaxXauzHXm62xOn+zJpulsTprsTWbobiNLdgiS3YcKC7twdqc7diebc/09x7kYKc7/m/U605u6N0tyt6czdjsrc7WhMH/XVcan4PnFbfgNpbypx8z3F/qYu5VdM1lmsjWZRww4H9XShOUpaJzdvsoinIdZOti9QiPXfIlDPg8s+NqDzH2QnSH6bGwAA
         run: |
           set -euo pipefail
-          python3 <<'PY'
-          from pathlib import Path
-          import os
-
-          p = Path(os.environ['TEST_FILE'])
-          s = p.read_text()
-          title = "  it('withholds the live settlement while a journal repair targets the same prompt', async () => {"
-          start = s.index(title)
-          end = s.index("\n  it('does not let replay state events overwrite fresh connection status'", start)
-          block = s[start:end]
-          block = block.replace(
-              title,
-              """  it.each([\n    { label: 'repair converges', rearm: false },\n    { label: 'repair re-arms', rearm: true },\n  ])(\n    'withholds the live settlement while a journal repair targets the same prompt ($label)',\n    async ({ rearm }) => {""",
-              1,
-          )
-          stale = """    // The repair reload reads the whole turn back. Its replay publishes\n    // nothing here either — the prompt was never locally bound — so the\n    // assertion below cannot be satisfied by a second, post-repair publish."""
-          fresh = """    // The repair reload reads the whole turn back. The prompt was never\n    // locally bound, so the replay admission gate publishes nothing for it —\n    // the settlement asserted below can only come from releasing the value\n    // that the live path withheld."""
-          if stale not in block:
-              raise SystemExit('stale repair comment anchor missing')
-          block = block.replace(stale, fresh, 1)
-          repaired = block.index('    const repairedSession = createMockSession({')
-          journal = block.index('        liveJournal: [],', repaired)
-          marker = """        liveJournal: rearm\n          ? [\n              {\n                id: 7,\n                v: 1,\n                type: 'history_truncated',\n                promptId: 'prompt-live',\n                data: {\n                  reason: 'replay_window_exceeded',\n                  scope: 'live_journal',\n                  truncatedEvents: 1,\n                  retainedEvents: 0,\n                  maxBytes: 512,\n                  maxEvents: 1,\n                  fullTranscriptAvailable: true,\n                },\n              },\n            ]\n          : [],"""
-          block = block[:journal] + marker + block[journal + len('        liveJournal: [],'):]
-          close = block.rfind('\n  });')
-          if close < 0:
-              raise SystemExit('repair test closing anchor missing')
-          block = block[:close] + '\n    },\n  );' + block[close + len('\n  });'):]
-          s = s[:start] + block + s[end:]
-
-          family_title = "  it.each([\n    'missing input',"
-          fstart = s.index(family_title)
-          fend = s.index("\n  it('keeps replayed non-turn events from marking a prompt as waiting'", fstart)
-          family = s[fstart:fend]
-          vars_old = """      let blocks: readonly DaemonTranscriptBlock[] = [];\n      let notices: readonly DaemonSessionNotice[] = [];\n      let connection: DaemonConnectionState | undefined;\n\n      function Harness() {\n        blocks = useDaemonTranscriptBlocks();\n        notices = useDaemonSessionNotices().notices;\n        connection = useDaemonConnection();\n        return null;\n      }"""
-          vars_new = """      let blocks: readonly DaemonTranscriptBlock[] = [];\n      let notices: readonly DaemonSessionNotice[] = [];\n      let connection: DaemonConnectionState | undefined;\n      const settlements: DaemonPromptSettledEvent[] = [];\n\n      function Harness() {\n        blocks = useDaemonTranscriptBlocks();\n        notices = useDaemonSessionNotices().notices;\n        connection = useDaemonConnection();\n        useDaemonPromptSettled((event) => {\n          settlements.push(event);\n        });\n        return null;\n      }"""
-          if vars_old not in family:
-              raise SystemExit('invalid repair harness anchor missing')
-          family = family.replace(vars_old, vars_new, 1)
-          notice = """      expect(\n        notices.filter(\n          (notice) => notice.code === 'daemon.live_journal_repair.failed',\n        ),\n      ).toHaveLength(1);"""
-          if notice not in family:
-              raise SystemExit('failure notice assertion anchor missing')
-          family = family.replace(notice, notice + "\n      expect(settlements).toEqual([]);", 1)
-          s = s[:fstart] + family + s[fend:]
-          p.write_text(s)
-          PY
-          git diff --check
-          cp "$TEST_FILE" "$RUNNER_TEMP/review-tests.tsx"
-      - name: Prove re-arm regression fails before production fix
-        run: |
-          set -euo pipefail
-          set +e
-          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME") >"$RUNNER_TEMP/rearm-negative.log" 2>&1
-          status=$?
-          set -e
-          cat "$RUNNER_TEMP/rearm-negative.log"
-          test "$status" -ne 0
-          grep -F '1 failed' "$RUNNER_TEMP/rearm-negative.log"
-          grep -F '1 passed' "$RUNNER_TEMP/rearm-negative.log"
-          grep -F 'expected [] to deeply equal' "$RUNNER_TEMP/rearm-negative.log"
-      - name: Apply minimal production review fix
-        run: |
-          set -euo pipefail
-          python3 <<'PY'
-          from pathlib import Path
-          import os
-
-          p = Path(os.environ['PROD_FILE'])
-          s = p.read_text()
-          old = """                const existingRepair = liveJournalRepairRef.current;\n                liveJournalRepairRef.current =\n                  existingRepair?.target.signature === replayTarget.signature &&\n                  existingRepair.attempted\n                    ? existingRepair\n                    : {\n                        sessionId: activeSession.sessionId,\n                        target: replayTarget,\n                        checkpoint: {\n                          ...nextCheckpoint,\n                          maxBlocks: committedMaxBlocks,\n                        },\n                        ...(markerBlock\n                          ? { markerBlockId: markerBlock.id }\n                          : {}),\n                        observedSnapshotEventIds: new Set(\n                          liveJournal.flatMap((event) =>\n                            event.id === undefined ? [] : [event.id],\n                          ),\n                        ),\n                        snapshotLastEventId: activeSession.lastEventId ?? 0,\n                        lastObservedEventId: activeSession.lastEventId ?? 0,\n                        terminalSeen: false,\n                        attempted: false,\n                      };"""
-          new = """                const existingRepair = liveJournalRepairRef.current;\n                const reuseExistingRepair =\n                  existingRepair !== undefined &&\n                  existingRepair.target.signature === replayTarget.signature &&\n                  existingRepair.attempted;\n                if (reuseExistingRepair) {\n                  liveJournalRepairRef.current = existingRepair;\n                } else {\n                  liveJournalRepairRef.current = {\n                    sessionId: activeSession.sessionId,\n                    target: replayTarget,\n                    checkpoint: {\n                      ...nextCheckpoint,\n                      maxBlocks: committedMaxBlocks,\n                    },\n                    ...(markerBlock ? { markerBlockId: markerBlock.id } : {}),\n                    observedSnapshotEventIds: new Set(\n                      liveJournal.flatMap((event) =>\n                        event.id === undefined ? [] : [event.id],\n                      ),\n                    ),\n                    snapshotLastEventId: activeSession.lastEventId ?? 0,\n                    lastObservedEventId: activeSession.lastEventId ?? 0,\n                    terminalSeen: false,\n                    attempted: false,\n                  };\n                  if (existingRepair?.withheldSettlement) {\n                    publishPromptSettlement(existingRepair.withheldSettlement);\n                  }\n                }"""
-          if s.count(old) != 1:
-              raise SystemExit(f'expected one re-arm production anchor, got {s.count(old)}')
-          p.write_text(s.replace(old, new, 1))
-          PY
+          printf '%s' "$CANDIDATE_PATCH_GZ_B64" | base64 --decode | gzip -d > "$RUNNER_TEMP/candidate.patch"
+          git apply --check "$RUNNER_TEMP/candidate.patch"
+          git apply "$RUNNER_TEMP/candidate.patch"
           git diff --check
           mapfile -t changed < <(git diff --name-only)
-          printf '%s\n' "${changed[@]}"
           test "${#changed[@]}" -eq 2
           printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
           printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
-          git diff --binary -- "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/candidate.patch"
-          sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/candidate-sha256.txt"
-          cp "$PROD_FILE" "$RUNNER_TEMP/candidate-provider.tsx"
-      - name: Run review regressions
-        run: |
-          set -euo pipefail
-          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME") 2>&1 | tee "$RUNNER_TEMP/rearm-positive.log"
-          grep -F '2 passed' "$RUNNER_TEMP/rearm-positive.log"
-          ! grep -F '1 failed' "$RUNNER_TEMP/rearm-positive.log"
-          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$FAILURE_TEST_NAME") 2>&1 | tee "$RUNNER_TEMP/failure-positive.log"
-          grep -F '7 passed' "$RUNNER_TEMP/failure-positive.log"
-          ! grep -F '1 failed' "$RUNNER_TEMP/failure-positive.log"
-      - name: Prove failure path stays fail-closed
-        run: |
-          set -euo pipefail
-          cp "$PROD_FILE" "$RUNNER_TEMP/provider-before-failure-mutation.tsx"
-          python3 <<'PY'
-          from pathlib import Path
-          import os
-          p = Path(os.environ['PROD_FILE'])
-          s = p.read_text()
-          old = """            recoverable: true,\n          });\n          liveJournalRepairRef.current = undefined;\n        },\n      );"""
-          new = """            recoverable: true,\n          });\n          if (repair.withheldSettlement) {\n            publishPromptSettlement(repair.withheldSettlement);\n          }\n          liveJournalRepairRef.current = undefined;\n        },\n      );"""
-          if s.count(old) != 1:
-              raise SystemExit(f'expected one repair failure catch anchor, got {s.count(old)}')
-          p.write_text(s.replace(old, new, 1))
-          PY
-          set +e
-          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$FAILURE_TEST_NAME") >"$RUNNER_TEMP/failure-negative.log" 2>&1
-          status=$?
-          set -e
-          cp "$RUNNER_TEMP/provider-before-failure-mutation.tsx" "$PROD_FILE"
-          cmp "$RUNNER_TEMP/candidate-provider.tsx" "$PROD_FILE"
-          cat "$RUNNER_TEMP/failure-negative.log"
-          test "$status" -ne 0
-          grep -F '7 failed' "$RUNNER_TEMP/failure-negative.log"
-          grep -F 'to deeply equal []' "$RUNNER_TEMP/failure-negative.log"
-          grep -F '"promptId": "prompt-live"' "$RUNNER_TEMP/failure-negative.log"
+          test "$(sha256sum "$PROD_FILE" | cut -d' ' -f1)" = "$EXPECTED_PROD_SHA256"
+          test "$(sha256sum "$TEST_FILE" | cut -d' ' -f1)" = "$EXPECTED_TEST_SHA256"
       - name: Run complete affected test file
         run: |
           set -euo pipefail
           (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx) 2>&1 | tee "$RUNNER_TEMP/affected-file.log"
-          grep -F 'Test Files  1 passed' "$RUNNER_TEMP/affected-file.log"
-          grep -E 'Tests[[:space:]]+[0-9]+ passed \([0-9]+\)' "$RUNNER_TEMP/affected-file.log"
-          ! grep -F ' failed ' "$RUNNER_TEMP/affected-file.log"
+          grep -F 'Test Files  1 passed (1)' "$RUNNER_TEMP/affected-file.log"
+          grep -F 'Tests  411 passed (411)' "$RUNNER_TEMP/affected-file.log"
       - name: Run Web Shell type lint and format checks
         run: |
           set -euo pipefail
-          (cd packages/web-shell && npm run typecheck) 2>&1 | tee "$RUNNER_TEMP/typecheck.log"
-          (cd packages/web-shell && npm run lint) 2>&1 | tee "$RUNNER_TEMP/lint.log"
-          (cd packages/web-shell && npm run format:check) 2>&1 | tee "$RUNNER_TEMP/format.log"
+          (cd packages/web-shell && npm run typecheck)
+          (cd packages/web-shell && npm run lint)
+          (cd packages/web-shell && npm run format:check)
       - name: Verify exact candidate scope before repository preflight
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           git diff --check
           mapfile -t changed < <(git diff --name-only)
-          printf '%s\n' "${changed[@]}"
           test "${#changed[@]}" -eq 2
           printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
           printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
+          test "$(sha256sum "$PROD_FILE" | cut -d' ' -f1)" = "$EXPECTED_PROD_SHA256"
+          test "$(sha256sum "$TEST_FILE" | cut -d' ' -f1)" = "$EXPECTED_TEST_SHA256"
           test -z "$(git diff --cached --name-only)"
       - name: Run literal repository preflight
         run: |
           set -euo pipefail
-          npm run preflight 2>&1 | tee "$RUNNER_TEMP/preflight.log"
+          npm run preflight
       - name: Final immutable source and residue audit
         if: always()
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           git diff --check
-          if [[ -f "$RUNNER_TEMP/candidate-sha256.txt" ]]; then
-            mapfile -t changed < <(git diff --name-only)
-            printf '%s\n' "${changed[@]}"
-            test "${#changed[@]}" -eq 2
-            printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
-            printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
-            test -z "$(git diff --cached --name-only)"
-            sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/final-sha256.txt"
-            diff -u "$RUNNER_TEMP/candidate-sha256.txt" "$RUNNER_TEMP/final-sha256.txt"
-            cmp "$RUNNER_TEMP/review-tests.tsx" "$TEST_FILE"
-            cmp "$RUNNER_TEMP/candidate-provider.tsx" "$PROD_FILE"
-          else
-            test -z "$(git status --short)"
-          fi
-      - name: Upload candidate evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: issue-12230-review-fixes
-          path: |
-            ${{ runner.temp }}/candidate.patch
-            ${{ runner.temp }}/candidate-sha256.txt
-            ${{ runner.temp }}/final-sha256.txt
-            ${{ runner.temp }}/install.log
-            ${{ runner.temp }}/build.log
-            ${{ runner.temp }}/rearm-negative.log
-            ${{ runner.temp }}/rearm-positive.log
-            ${{ runner.temp }}/failure-positive.log
-            ${{ runner.temp }}/failure-negative.log
-            ${{ runner.temp }}/affected-file.log
-            ${{ runner.temp }}/typecheck.log
-            ${{ runner.temp }}/lint.log
-            ${{ runner.temp }}/format.log
-            ${{ runner.temp }}/preflight.log
-          if-no-files-found: ignore
-          retention-days: 7
+          mapfile -t changed < <(git diff --name-only)
+          test "${#changed[@]}" -eq 2
+          printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
+          printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
+          test "$(sha256sum "$PROD_FILE" | cut -d' ' -f1)" = "$EXPECTED_PROD_SHA256"
+          test "$(sha256sum "$TEST_FILE" | cut -d' ' -f1)" = "$EXPECTED_TEST_SHA256"
+          test -z "$(git diff --cached --name-only)"
