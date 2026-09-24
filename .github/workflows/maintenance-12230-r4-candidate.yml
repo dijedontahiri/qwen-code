@@ -1,14 +1,14 @@
-name: Validate issue 12230 R4 candidate
+name: Validate issue 12230 review repairs
 
 on:
   push:
     branches:
-      - validation/12230-r4-candidate
+      - validation/12230-review-r1
     paths:
       - .github/workflows/maintenance-12230-r4-candidate.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   candidate:
@@ -16,29 +16,36 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      BASE_SHA: e39d2390fc633107bfb8bdb7d8c9fbbf5a137cbd
-      OLD_BASE_SHA: eceaede18ea5c37404b79974c6d4833c12c23935
-      OLD_PRODUCT_SHA: 132af78eba065ddf107f4c95aca897094cd021f3
-      TEST_NAME: withholds the live settlement while a journal repair targets the same prompt
+      PRODUCT_SHA: aec6623e184a3d58502f712c8cc6b9e2af54bb77
+      PRODUCT_BRANCH: fix/12230-live-journal-settlement-r4
+      CANDIDATE_BRANCH: candidate/12230-review-r1
       PROD_FILE: packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx
       TEST_FILE: packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+      REARM_TEST: releases the withheld settlement before re-arming a newer live-journal repair
+      ORIGINAL_TEST: withholds the live settlement while a journal repair targets the same prompt
+      INVALID_TEST: keeps the retained transcript and reports one repair failure
       NO_COLOR: '1'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          repository: QwenLM/qwen-code
-          ref: e39d2390fc633107bfb8bdb7d8c9fbbf5a137cbd
+          repository: dijedontahiri/qwen-code
+          ref: aec6623e184a3d58502f712c8cc6b9e2af54bb77
           fetch-depth: 1
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 22.16.0
-      - name: Verify immutable source identity
+      - name: Verify immutable source and remote identities
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
           test -z "$(git status --short)"
-          node -e "const p=require('./package.json'); if (!p.packageManager.startsWith('pnpm@11.24.0')) throw new Error('unexpected packageManager '+p.packageManager)"
+          test "$(git ls-remote https://x-access-token:${GH_TOKEN}@github.com/dijedontahiri/qwen-code.git refs/heads/${PRODUCT_BRANCH} | awk '{print $1}')" = "$PRODUCT_SHA"
+          test "$(git ls-remote https://x-access-token:${GH_TOKEN}@github.com/dijedontahiri/qwen-code.git refs/heads/${CANDIDATE_BRANCH} | awk '{print $1}')" = "$PRODUCT_SHA"
+          node -e "const p=require('./package.json'); if (p.engines?.node !== '>=22.0.0') throw new Error('unexpected Node engine '+p.engines?.node); if (!p.packageManager.startsWith('pnpm@11.24.0')) throw new Error('unexpected packageManager '+p.packageManager)"
+          df -h .
       - name: Install locked dependencies and build workspace
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -47,41 +54,127 @@ jobs:
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only 2>&1 | tee "$RUNNER_TEMP/install.log"
           npm run build 2>&1 | tee "$RUNNER_TEMP/build.log"
           git restore --source=HEAD --staged --worktree .
-          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
           test -z "$(git status --short)"
-      - name: Apply the recovered product diff and repair the test harness
+      - name: Add review regression coverage without changing production
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=3 https://github.com/dijedontahiri/qwen-code.git \
-            refs/heads/fix/12230-live-journal-settlement:refs/remotes/recovered/product
-          test "$(git rev-parse refs/remotes/recovered/product)" = "$OLD_PRODUCT_SHA"
-          git cat-file -e "$OLD_BASE_SHA^{commit}"
-          git diff --binary "$OLD_BASE_SHA" "$OLD_PRODUCT_SHA" -- "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/recovered.patch"
-          test -s "$RUNNER_TEMP/recovered.patch"
-          git apply --check "$RUNNER_TEMP/recovered.patch"
-          git apply "$RUNNER_TEMP/recovered.patch"
           node <<'NODE'
           const fs = require('fs');
           const p = process.env.TEST_FILE;
           let s = fs.readFileSync(p, 'utf8');
-          const title = "it('withholds the live settlement while a journal repair targets the same prompt'";
-          const start = s.indexOf(title);
-          if (start < 0) throw new Error('named regression not found');
-          const end = s.indexOf("\n  it('", start + title.length);
-          if (end < 0) throw new Error('next test boundary not found');
-          let block = s.slice(start, end);
-          const old = '    await renderWithProvider(<Harness />, { autoConnect: true });';
-          const count = block.split(old).length - 1;
-          if (count !== 1) throw new Error(`expected one render anchor in regression, got ${count}`);
-          const replacement = [
-            '    await renderWithProvider(<Harness />, {',
-            '      autoConnect: true,',
-            '      sessionId: initialSession.sessionId,',
-            '    });',
-          ].join('\n');
-          block = block.replace(old, replacement);
-          s = s.slice(0, start) + block + s.slice(end);
+          const replaceOnce = (input, oldText, newText, label) => {
+            const count = input.split(oldText).length - 1;
+            if (count !== 1) throw new Error(`${label}: expected one anchor, got ${count}`);
+            return input.replace(oldText, newText);
+          };
+
+          s = replaceOnce(
+            s,
+            `    // The repair reload reads the whole turn back. Its replay publishes\n    // nothing here either — the prompt was never locally bound — so the\n    // assertion below cannot be satisfied by a second, post-repair publish.`,
+            `    // The repair reload reads the whole turn back. Its replay publishes\n    // nothing by itself because the prompt was never locally bound; the\n    // settlement asserted below comes from releasing the live value withheld\n    // above after the repaired projection has been applied.`,
+            'settlement regression comment',
+          );
+
+          const invalidTitle = "'keeps the retained transcript and reports one repair failure for %s',";
+          const invalidTitleAt = s.indexOf(invalidTitle);
+          if (invalidTitleAt < 0) throw new Error('invalid-repair family title not found');
+          const invalidStart = s.lastIndexOf('  it.each([', invalidTitleAt);
+          const invalidEnd = s.indexOf('\n  it(', invalidTitleAt);
+          if (invalidStart < 0 || invalidEnd < 0) throw new Error('invalid-repair family boundaries not found');
+          let invalid = s.slice(invalidStart, invalidEnd);
+          invalid = replaceOnce(
+            invalid,
+            `      let blocks: readonly DaemonTranscriptBlock[] = [];\n      let notices: readonly DaemonSessionNotice[] = [];\n      let connection: DaemonConnectionState | undefined;`,
+            `      let blocks: readonly DaemonTranscriptBlock[] = [];\n      let notices: readonly DaemonSessionNotice[] = [];\n      let connection: DaemonConnectionState | undefined;\n      const settlements: DaemonPromptSettledEvent[] = [];`,
+            'invalid-repair settlement storage',
+          );
+          invalid = replaceOnce(
+            invalid,
+            `      function Harness() {\n        blocks = useDaemonTranscriptBlocks();\n        notices = useDaemonSessionNotices().notices;\n        connection = useDaemonConnection();\n        return null;\n      }`,
+            `      function Harness() {\n        blocks = useDaemonTranscriptBlocks();\n        notices = useDaemonSessionNotices().notices;\n        connection = useDaemonConnection();\n        useDaemonPromptSettled((event) => {\n          settlements.push(event);\n        });\n        return null;\n      }`,
+            'invalid-repair harness',
+          );
+          invalid = replaceOnce(
+            invalid,
+            `      ).toHaveLength(1);\n      if (`,
+            `      ).toHaveLength(1);\n      expect(settlements).toEqual([]);\n      if (`,
+            'invalid-repair no-settlement assertion',
+          );
+          s = s.slice(0, invalidStart) + invalid + s.slice(invalidEnd);
+
+          const successTitle = "  it('withholds the live settlement while a journal repair targets the same prompt'";
+          const successStart = s.indexOf(successTitle);
+          const successEnd = s.indexOf("\n  it('does not let replay state events overwrite fresh connection status'", successStart);
+          if (successStart < 0 || successEnd < 0) throw new Error('success regression boundaries not found');
+          let rearm = s.slice(successStart, successEnd);
+          rearm = rearm.replace(
+            "  it('withholds the live settlement while a journal repair targets the same prompt'",
+            "  it('releases the withheld settlement before re-arming a newer live-journal repair'",
+          );
+          const repairedStart = rearm.indexOf('    const repairedSession = createMockSession({');
+          if (repairedStart < 0) throw new Error('repaired session anchor not found');
+          const emptyJournal = '        liveJournal: [],';
+          const journalAt = rearm.indexOf(emptyJournal, repairedStart);
+          if (journalAt < 0) throw new Error('repaired empty live journal not found');
+          const marker = `        liveJournal: [\n          {\n            v: 1,\n            type: 'history_truncated',\n            promptId: 'prompt-live',\n            data: {\n              reason: 'replay_window_exceeded',\n              scope: 'live_journal',\n              truncatedEvents: 3,\n              retainedEvents: 0,\n              maxBytes: 512,\n              maxEvents: 1,\n              fullTranscriptAvailable: true,\n            },\n          },\n        ],`;
+          rearm = rearm.slice(0, journalAt) + marker + rearm.slice(journalAt + emptyJournal.length);
+          rearm = rearm.replace(
+            `    // The load arms a live-journal repair for \`prompt-live\` and the same\n    // prompt's terminal then arrives on the live stream. Publishing there\n    // would certify the truncated projection as the turn's final message, and\n    // the key burn makes it uncorrectable, so the live path withholds it until\n    // the repair resolves. Dropping \`!repairTargetsTerminal\` from the publish\n    // condition turns this red.`,
+            `    // A successful repair can still return a newer recoverable marker.\n    // The first episode's live settlement must be released after its repaired\n    // projection is applied and before that newer marker replaces the episode.`,
+          );
+          s = s.slice(0, successEnd) + '\n' + rearm + s.slice(successEnd);
           fs.writeFileSync(p, s);
+          NODE
+          git diff --check -- "$TEST_FILE"
+          test -z "$(git diff --name-only -- "$PROD_FILE")"
+          test "$(git diff --name-only -- "$TEST_FILE")" = "$TEST_FILE"
+      - name: Prove the re-arm regression fails on the reviewed production head
+        run: |
+          set -euo pipefail
+          set +e
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$REARM_TEST") > "$RUNNER_TEMP/rearm-negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/rearm-negative.log"
+          test "$status" -ne 0
+          grep -F "$REARM_TEST" "$RUNNER_TEMP/rearm-negative.log"
+          grep -F 'AssertionError' "$RUNNER_TEMP/rearm-negative.log"
+      - name: Prove failure-path coverage catches premature settlement publication
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const p = process.env.PROD_FILE;
+          let s = fs.readFileSync(p, 'utf8');
+          const oldText = `          if (liveJournalRepairRef.current !== repair) return;\n          addNotice({`;
+          const newText = `          if (liveJournalRepairRef.current !== repair) return;\n          if (repair.withheldSettlement) {\n            publishPromptSettlement(repair.withheldSettlement);\n          }\n          addNotice({`;
+          const count = s.split(oldText).length - 1;
+          if (count !== 1) throw new Error(`failure mutation anchor count ${count}`);
+          fs.writeFileSync(p, s.replace(oldText, newText));
+          NODE
+          set +e
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$INVALID_TEST") > "$RUNNER_TEMP/failure-mutation.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/failure-mutation.log"
+          test "$status" -ne 0
+          grep -E 'Tests[[:space:]]+7 failed' "$RUNNER_TEMP/failure-mutation.log"
+          grep -F 'AssertionError' "$RUNNER_TEMP/failure-mutation.log"
+          git restore --source=HEAD -- "$PROD_FILE"
+          test -z "$(git diff --name-only -- "$PROD_FILE")"
+      - name: Apply the focused production repair
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const p = process.env.PROD_FILE;
+          let s = fs.readFileSync(p, 'utf8');
+          const oldText = `                const existingRepair = liveJournalRepairRef.current;\n                liveJournalRepairRef.current =\n                  existingRepair?.target.signature === replayTarget.signature &&\n                  existingRepair.attempted\n                    ? existingRepair\n                    : {`;
+          const newText = `                const existingRepair = liveJournalRepairRef.current;\n                const preserveExistingRepair =\n                  existingRepair?.target.signature === replayTarget.signature &&\n                  existingRepair.attempted;\n                if (\n                  repairingEpisode !== undefined &&\n                  existingRepair === repairingEpisode &&\n                  !preserveExistingRepair &&\n                  repairingEpisode.withheldSettlement\n                ) {\n                  publishPromptSettlement(\n                    repairingEpisode.withheldSettlement,\n                  );\n                }\n                liveJournalRepairRef.current = preserveExistingRepair\n                  ? existingRepair\n                  : {`;
+          const count = s.split(oldText).length - 1;
+          if (count !== 1) throw new Error(`repair re-arm anchor count ${count}`);
+          fs.writeFileSync(p, s.replace(oldText, newText));
           NODE
           git diff --check
           mapfile -t changed < <(git diff --name-only)
@@ -91,31 +184,33 @@ jobs:
           printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
           git diff --binary -- "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/candidate.patch"
           sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/candidate-sha256.txt"
-      - name: Run named regression
+      - name: Run focused review regressions
         run: |
           set -euo pipefail
-          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$TEST_NAME") 2>&1 | tee "$RUNNER_TEMP/named-regression.log"
-          grep -F '1 passed' "$RUNNER_TEMP/named-regression.log"
-          ! grep -F '1 failed' "$RUNNER_TEMP/named-regression.log"
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$REARM_TEST") 2>&1 | tee "$RUNNER_TEMP/rearm-positive.log"
+          grep -E 'Tests[[:space:]]+1 passed' "$RUNNER_TEMP/rearm-positive.log"
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$ORIGINAL_TEST") 2>&1 | tee "$RUNNER_TEMP/original-positive.log"
+          grep -E 'Tests[[:space:]]+1 passed' "$RUNNER_TEMP/original-positive.log"
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$INVALID_TEST") 2>&1 | tee "$RUNNER_TEMP/invalid-positive.log"
+          grep -E 'Tests[[:space:]]+7 passed' "$RUNNER_TEMP/invalid-positive.log"
       - name: Run complete affected test file
         run: |
           set -euo pipefail
           (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx) 2>&1 | tee "$RUNNER_TEMP/affected-file.log"
           grep -F 'Test Files  1 passed' "$RUNNER_TEMP/affected-file.log"
-          grep -E 'Tests[[:space:]]+[0-9]+ passed \([0-9]+\)' "$RUNNER_TEMP/affected-file.log"
+          grep -E 'Tests[[:space:]]+411 passed \(411\)' "$RUNNER_TEMP/affected-file.log"
       - name: Run Web Shell type lint and format checks
         run: |
           set -euo pipefail
           (cd packages/web-shell && npm run typecheck) 2>&1 | tee "$RUNNER_TEMP/typecheck.log"
           (cd packages/web-shell && npm run lint) 2>&1 | tee "$RUNNER_TEMP/lint.log"
           (cd packages/web-shell && npm run format:check) 2>&1 | tee "$RUNNER_TEMP/format.log"
-      - name: Verify exact candidate scope before repository preflight
+      - name: Verify exact review scope before literal preflight
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
           git diff --check
           mapfile -t changed < <(git diff --name-only)
-          printf '%s\n' "${changed[@]}"
           test "${#changed[@]}" -eq 2
           printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
           printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
@@ -124,40 +219,60 @@ jobs:
         run: |
           set -euo pipefail
           npm run preflight 2>&1 | tee "$RUNNER_TEMP/preflight.log"
-      - name: Final immutable source and residue audit
-        if: always()
+      - name: Final source, residue, and hash audit
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
           git diff --check
-          if [[ -f "$RUNNER_TEMP/candidate-sha256.txt" ]]; then
-            mapfile -t changed < <(git diff --name-only)
-            printf '%s\n' "${changed[@]}"
-            test "${#changed[@]}" -eq 2
-            printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
-            printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
-            test -z "$(git diff --cached --name-only)"
-            sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/final-sha256.txt"
-            diff -u "$RUNNER_TEMP/candidate-sha256.txt" "$RUNNER_TEMP/final-sha256.txt"
-          else
-            test -z "$(git status --short)"
-          fi
-      - name: Upload candidate evidence
+          mapfile -t changed < <(git diff --name-only)
+          test "${#changed[@]}" -eq 2
+          printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
+          printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          sha256sum "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/final-sha256.txt"
+          diff -u "$RUNNER_TEMP/candidate-sha256.txt" "$RUNNER_TEMP/final-sha256.txt"
+          git diff -- "$PROD_FILE" "$TEST_FILE" > "$RUNNER_TEMP/final-review.diff"
+          test -s "$RUNNER_TEMP/final-review.diff"
+      - name: Commit and fast-forward the isolated review candidate branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          remote_product="$(git ls-remote https://x-access-token:${GH_TOKEN}@github.com/dijedontahiri/qwen-code.git refs/heads/${PRODUCT_BRANCH} | awk '{print $1}')"
+          remote_candidate="$(git ls-remote https://x-access-token:${GH_TOKEN}@github.com/dijedontahiri/qwen-code.git refs/heads/${CANDIDATE_BRANCH} | awk '{print $1}')"
+          test "$remote_product" = "$PRODUCT_SHA"
+          test "$remote_candidate" = "$PRODUCT_SHA"
+          git config user.name 'dijedontahiri'
+          git config user.email '99071957+dijedontahiri@users.noreply.github.com'
+          git add "$PROD_FILE" "$TEST_FILE"
+          git commit -m 'fix(web-shell): release settlement before repair rearm'
+          candidate_sha="$(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD^)" = "$PRODUCT_SHA"
+          printf '%s\n' "$candidate_sha" > "$RUNNER_TEMP/candidate-commit.txt"
+          git push https://x-access-token:${GH_TOKEN}@github.com/dijedontahiri/qwen-code.git HEAD:refs/heads/${CANDIDATE_BRANCH}
+      - name: Upload review evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: issue-12230-r4-candidate
+          name: issue-12230-review-r1
           path: |
-            ${{ runner.temp }}/candidate.patch
-            ${{ runner.temp }}/candidate-sha256.txt
-            ${{ runner.temp }}/final-sha256.txt
             ${{ runner.temp }}/install.log
             ${{ runner.temp }}/build.log
-            ${{ runner.temp }}/named-regression.log
+            ${{ runner.temp }}/rearm-negative.log
+            ${{ runner.temp }}/failure-mutation.log
+            ${{ runner.temp }}/candidate.patch
+            ${{ runner.temp }}/candidate-sha256.txt
+            ${{ runner.temp }}/rearm-positive.log
+            ${{ runner.temp }}/original-positive.log
+            ${{ runner.temp }}/invalid-positive.log
             ${{ runner.temp }}/affected-file.log
             ${{ runner.temp }}/typecheck.log
             ${{ runner.temp }}/lint.log
             ${{ runner.temp }}/format.log
             ${{ runner.temp }}/preflight.log
+            ${{ runner.temp }}/final-sha256.txt
+            ${{ runner.temp }}/final-review.diff
+            ${{ runner.temp }}/candidate-commit.txt
           if-no-files-found: ignore
           retention-days: 7
