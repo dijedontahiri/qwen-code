@@ -153,10 +153,10 @@ jobs:
           import os
           p = Path(os.environ['PROD_FILE'])
           s = p.read_text()
-          old = """          liveJournalRepairRef.current = undefined;\n        },"""
-          new = """          if (repair.withheldSettlement) {\n            publishPromptSettlement(repair.withheldSettlement);\n          }\n          liveJournalRepairRef.current = undefined;\n        },"""
+          old = """            recoverable: true,\n          });\n          liveJournalRepairRef.current = undefined;\n        },\n      );"""
+          new = """            recoverable: true,\n          });\n          if (repair.withheldSettlement) {\n            publishPromptSettlement(repair.withheldSettlement);\n          }\n          liveJournalRepairRef.current = undefined;\n        },\n      );"""
           if s.count(old) != 1:
-              raise SystemExit(f'expected one repair catch anchor, got {s.count(old)}')
+              raise SystemExit(f'expected one repair failure catch anchor, got {s.count(old)}')
           p.write_text(s.replace(old, new, 1))
           PY
           set +e
