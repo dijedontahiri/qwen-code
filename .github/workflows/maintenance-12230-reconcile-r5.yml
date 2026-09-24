@@ -63,6 +63,8 @@ jobs:
           test "$(git cat-file -t "$BASE_SHA")" = commit
           git merge-base --is-ancestor "$BASE_SHA" upstream/main
           test -z "$(git diff --name-only "$BASE_SHA" upstream/main -- "$TARGET1" "$TARGET2")"
+          git fetch --no-tags origin "$PRODUCT_BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE_SHA"
           git checkout --detach "$BASE_SHA"
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test -z "$(git status --short)"
@@ -78,10 +80,5 @@ jobs:
           git commit -m 'fix(web-shell): preserve settlement through journal repair'
           candidate=$(git rev-parse HEAD)
           test "$(git rev-parse HEAD^)" = "$BASE_SHA"
-          test -z "$(git diff --name-only "$BASE_SHA" HEAD -- . ':!.github')" || true
-          if git ls-remote --exit-code --heads origin "$PRODUCT_BRANCH" >/dev/null 2>&1; then
-            echo "Refusing to overwrite existing product branch $PRODUCT_BRANCH" >&2
-            exit 1
-          fi
           git push origin HEAD:"refs/heads/$PRODUCT_BRANCH"
           printf 'candidate=%s\n' "$candidate"
