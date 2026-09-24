@@ -9775,11 +9775,15 @@ describe('DaemonSessionProvider', () => {
       let blocks: readonly DaemonTranscriptBlock[] = [];
       let notices: readonly DaemonSessionNotice[] = [];
       let connection: DaemonConnectionState | undefined;
+      const settlements: DaemonPromptSettledEvent[] = [];
 
       function Harness() {
         blocks = useDaemonTranscriptBlocks();
         notices = useDaemonSessionNotices().notices;
         connection = useDaemonConnection();
+        useDaemonPromptSettled((event) => {
+          settlements.push(event);
+        });
         return null;
       }
 
@@ -9830,6 +9834,7 @@ describe('DaemonSessionProvider', () => {
           (notice) => notice.code === 'daemon.live_journal_repair.failed',
         ),
       ).toHaveLength(1);
+      expect(settlements).toEqual([]);
       if (
         invalidCase === 'network error' ||
         invalidCase === 'auth error' ||
@@ -11805,175 +11810,200 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('withholds the live settlement while a journal repair targets the same prompt', async () => {
-    // The load arms a live-journal repair for `prompt-live` and the same
-    // prompt's terminal then arrives on the live stream. Publishing there
-    // would certify the truncated projection as the turn's final message, and
-    // the key burn makes it uncorrectable, so the live path withholds it until
-    // the repair resolves. Dropping `!repairTargetsTerminal` from the publish
-    // condition turns this red.
-    const terminalGate = createDeferred<void>();
-    const repairGate = createDeferred<void>();
-    const initialSession = createMockSession({
-      sessionId: 'session-settle-repair',
-      hasActivePrompt: true,
-      lastEventId: 5,
-      replaySnapshot: {
-        compactedReplay: [],
-        liveJournal: [
-          {
-            v: 1,
-            type: 'history_truncated',
-            promptId: 'prompt-live',
-            data: {
-              reason: 'replay_window_exceeded',
-              scope: 'live_journal',
-              truncatedEvents: 2,
-              retainedEvents: 1,
-              maxBytes: 512,
-              maxEvents: 1,
-              fullTranscriptAvailable: true,
-            },
-          },
-          {
-            id: 5,
-            v: 1,
-            type: 'session_update',
-            promptId: 'prompt-live',
-            data: {
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: 'retained tail' },
+  it.each([
+    { label: 'repair converges', rearm: false },
+    { label: 'repair re-arms', rearm: true },
+  ])(
+    'withholds the live settlement while a journal repair targets the same prompt ($label)',
+    async ({ rearm }) => {
+      // The load arms a live-journal repair for `prompt-live` and the same
+      // prompt's terminal then arrives on the live stream. Publishing there
+      // would certify the truncated projection as the turn's final message, and
+      // the key burn makes it uncorrectable, so the live path withholds it until
+      // the repair resolves. Dropping `!repairTargetsTerminal` from the publish
+      // condition turns this red.
+      const terminalGate = createDeferred<void>();
+      const repairGate = createDeferred<void>();
+      const initialSession = createMockSession({
+        sessionId: 'session-settle-repair',
+        hasActivePrompt: true,
+        lastEventId: 5,
+        replaySnapshot: {
+          compactedReplay: [],
+          liveJournal: [
+            {
+              v: 1,
+              type: 'history_truncated',
+              promptId: 'prompt-live',
+              data: {
+                reason: 'replay_window_exceeded',
+                scope: 'live_journal',
+                truncatedEvents: 2,
+                retainedEvents: 1,
+                maxBytes: 512,
+                maxEvents: 1,
+                fullTranscriptAvailable: true,
               },
             },
-          },
-        ],
-      },
-      events: async function* matchingTerminal(
-        options: { signal?: AbortSignal } = {},
-      ) {
-        await Promise.race([
-          terminalGate.promise,
-          new Promise<void>((resolve) =>
-            options.signal?.addEventListener('abort', () => resolve(), {
-              once: true,
-            }),
-          ),
-        ]);
-        if (options.signal?.aborted) return;
-        yield {
-          id: 6,
-          v: 1,
-          type: 'turn_complete',
-          promptId: 'prompt-live',
-          data: { promptId: 'prompt-live', stopReason: 'end_turn' },
-        } satisfies DaemonEvent;
-        await new Promise<void>((resolve) =>
-          options.signal?.addEventListener('abort', () => resolve(), {
-            once: true,
-          }),
-        );
-      },
-    });
-    // The repair reload reads the whole turn back. Its replay publishes
-    // nothing here either — the prompt was never locally bound — so the
-    // assertion below cannot be satisfied by a second, post-repair publish.
-    const repairedSession = createMockSession({
-      sessionId: 'session-settle-repair',
-      lastEventId: 7,
-      replaySnapshot: {
-        compactedReplay: [
-          {
-            id: 4,
-            v: 1,
-            type: 'session_update',
-            promptId: 'prompt-live',
-            data: {
-              update: {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'long prompt' },
+            {
+              id: 5,
+              v: 1,
+              type: 'session_update',
+              promptId: 'prompt-live',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'retained tail' },
+                },
               },
             },
-          },
-          {
-            id: 5,
-            v: 1,
-            type: 'session_update',
-            promptId: 'prompt-live',
-            data: {
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: 'repaired answer' },
-              },
-            },
-          },
-          {
+          ],
+        },
+        events: async function* matchingTerminal(
+          options: { signal?: AbortSignal } = {},
+        ) {
+          await Promise.race([
+            terminalGate.promise,
+            new Promise<void>((resolve) =>
+              options.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              }),
+            ),
+          ]);
+          if (options.signal?.aborted) return;
+          yield {
             id: 6,
             v: 1,
             type: 'turn_complete',
             promptId: 'prompt-live',
             data: { promptId: 'prompt-live', stopReason: 'end_turn' },
-          },
-        ],
-        liveJournal: [],
-      },
-    });
-    sdkMocks.MockDaemonSessionClient.load
-      .mockImplementationOnce(async (client: unknown) => {
-        initialSession.client = client as MockClient;
-        return initialSession;
-      })
-      .mockImplementationOnce(async (client: unknown) => {
-        await repairGate.promise;
-        repairedSession.client = client as MockClient;
-        return repairedSession;
+          } satisfies DaemonEvent;
+          await new Promise<void>((resolve) =>
+            options.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          );
+        },
       });
-    const settlements: DaemonPromptSettledEvent[] = [];
-
-    function Harness() {
-      useDaemonPromptSettled((event) => {
-        settlements.push(event);
-      });
-      return null;
-    }
-
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      sessionId: initialSession.sessionId,
-    });
-    await act(async () => {
-      terminalGate.resolve();
-      await flushPromises();
-      await flushTranscriptDispatch();
-    });
-
-    expect(settlements).toEqual([]);
-    // Positive control: the episode really was armed for this prompt and the
-    // terminal started the repair, while publication is still withheld until
-    // the repaired projection is available.
-    await vi.waitFor(() =>
-      expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
-    );
-    expect(settlements).toEqual([]);
-
-    await act(async () => {
-      repairGate.resolve();
-      await flushPromises();
-      await flushTranscriptDispatch();
-    });
-
-    // The repair reapplies the complete transcript before releasing the exact
-    // settlement withheld from the live path. A never-admitted prompt does not
-    // need to pass the ordinary replay admission gate to receive that settlement.
-    expect(settlements).toEqual([
-      {
+      // The repair reload reads the whole turn back. The prompt was never
+      // locally bound, so the replay admission gate publishes nothing for it —
+      // the settlement asserted below can only come from releasing the value
+      // that the live path withheld.
+      const repairedSession = createMockSession({
         sessionId: 'session-settle-repair',
-        promptId: 'prompt-live',
-        outcome: 'completed',
-        stopReason: 'end_turn',
-      },
-    ]);
-  });
+        lastEventId: 7,
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 4,
+              v: 1,
+              type: 'session_update',
+              promptId: 'prompt-live',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'long prompt' },
+                },
+              },
+            },
+            {
+              id: 5,
+              v: 1,
+              type: 'session_update',
+              promptId: 'prompt-live',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'repaired answer' },
+                },
+              },
+            },
+            {
+              id: 6,
+              v: 1,
+              type: 'turn_complete',
+              promptId: 'prompt-live',
+              data: { promptId: 'prompt-live', stopReason: 'end_turn' },
+            },
+          ],
+          liveJournal: rearm
+            ? [
+                {
+                  id: 7,
+                  v: 1,
+                  type: 'history_truncated',
+                  promptId: 'prompt-live',
+                  data: {
+                    reason: 'replay_window_exceeded',
+                    scope: 'live_journal',
+                    truncatedEvents: 1,
+                    retainedEvents: 0,
+                    maxBytes: 512,
+                    maxEvents: 1,
+                    fullTranscriptAvailable: true,
+                  },
+                },
+              ]
+            : [],
+        },
+      });
+      sdkMocks.MockDaemonSessionClient.load
+        .mockImplementationOnce(async (client: unknown) => {
+          initialSession.client = client as MockClient;
+          return initialSession;
+        })
+        .mockImplementationOnce(async (client: unknown) => {
+          await repairGate.promise;
+          repairedSession.client = client as MockClient;
+          return repairedSession;
+        });
+      const settlements: DaemonPromptSettledEvent[] = [];
+
+      function Harness() {
+        useDaemonPromptSettled((event) => {
+          settlements.push(event);
+        });
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: initialSession.sessionId,
+      });
+      await act(async () => {
+        terminalGate.resolve();
+        await flushPromises();
+        await flushTranscriptDispatch();
+      });
+
+      expect(settlements).toEqual([]);
+      // Positive control: the episode really was armed for this prompt and the
+      // terminal started the repair, while publication is still withheld until
+      // the repaired projection is available.
+      await vi.waitFor(() =>
+        expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
+      );
+      expect(settlements).toEqual([]);
+
+      await act(async () => {
+        repairGate.resolve();
+        await flushPromises();
+        await flushTranscriptDispatch();
+      });
+
+      // The repair reapplies the complete transcript before releasing the exact
+      // settlement withheld from the live path. A never-admitted prompt does not
+      // need to pass the ordinary replay admission gate to receive that settlement.
+      expect(settlements).toEqual([
+        {
+          sessionId: 'session-settle-repair',
+          promptId: 'prompt-live',
+          outcome: 'completed',
+          stopReason: 'end_turn',
+        },
+      ]);
+    },
+  );
 
   it('does not let replay state events overwrite fresh connection status', async () => {
     sdkMocks.workspaceProviders.mockResolvedValueOnce({

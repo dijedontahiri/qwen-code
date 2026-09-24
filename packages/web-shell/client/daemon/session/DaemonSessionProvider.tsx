@@ -2936,30 +2936,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       block.data['scope'] === 'live_journal',
                   );
                 const existingRepair = liveJournalRepairRef.current;
-                liveJournalRepairRef.current =
-                  existingRepair?.target.signature === replayTarget.signature &&
-                  existingRepair.attempted
-                    ? existingRepair
-                    : {
-                        sessionId: activeSession.sessionId,
-                        target: replayTarget,
-                        checkpoint: {
-                          ...nextCheckpoint,
-                          maxBlocks: committedMaxBlocks,
-                        },
-                        ...(markerBlock
-                          ? { markerBlockId: markerBlock.id }
-                          : {}),
-                        observedSnapshotEventIds: new Set(
-                          liveJournal.flatMap((event) =>
-                            event.id === undefined ? [] : [event.id],
-                          ),
-                        ),
-                        snapshotLastEventId: activeSession.lastEventId ?? 0,
-                        lastObservedEventId: activeSession.lastEventId ?? 0,
-                        terminalSeen: false,
-                        attempted: false,
-                      };
+                const reuseExistingRepair =
+                  existingRepair !== undefined &&
+                  existingRepair.target.signature === replayTarget.signature &&
+                  existingRepair.attempted;
+                if (reuseExistingRepair) {
+                  liveJournalRepairRef.current = existingRepair;
+                } else {
+                  liveJournalRepairRef.current = {
+                    sessionId: activeSession.sessionId,
+                    target: replayTarget,
+                    checkpoint: {
+                      ...nextCheckpoint,
+                      maxBlocks: committedMaxBlocks,
+                    },
+                    ...(markerBlock ? { markerBlockId: markerBlock.id } : {}),
+                    observedSnapshotEventIds: new Set(
+                      liveJournal.flatMap((event) =>
+                        event.id === undefined ? [] : [event.id],
+                      ),
+                    ),
+                    snapshotLastEventId: activeSession.lastEventId ?? 0,
+                    lastObservedEventId: activeSession.lastEventId ?? 0,
+                    terminalSeen: false,
+                    attempted: false,
+                  };
+                  if (existingRepair?.withheldSettlement) {
+                    publishPromptSettlement(existingRepair.withheldSettlement);
+                  }
+                }
               } else if (repairingEpisode) {
                 liveJournalRepairRef.current = undefined;
                 if (repairingEpisode.withheldSettlement) {
