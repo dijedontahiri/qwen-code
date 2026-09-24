@@ -163,12 +163,13 @@ jobs:
           (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$FAILURE_TEST_NAME") >"$RUNNER_TEMP/failure-negative.log" 2>&1
           status=$?
           set -e
+          cp "$RUNNER_TEMP/provider-before-failure-mutation.tsx" "$PROD_FILE"
+          cmp "$RUNNER_TEMP/candidate-provider.tsx" "$PROD_FILE"
           cat "$RUNNER_TEMP/failure-negative.log"
           test "$status" -ne 0
           grep -F '7 failed' "$RUNNER_TEMP/failure-negative.log"
-          grep -F 'expected [ { ...(4) } ] to deeply equal []' "$RUNNER_TEMP/failure-negative.log"
-          cp "$RUNNER_TEMP/provider-before-failure-mutation.tsx" "$PROD_FILE"
-          cmp "$RUNNER_TEMP/candidate-provider.tsx" "$PROD_FILE"
+          grep -F 'to deeply equal []' "$RUNNER_TEMP/failure-negative.log"
+          grep -F '"promptId": "prompt-live"' "$RUNNER_TEMP/failure-negative.log"
       - name: Run complete affected test file
         run: |
           set -euo pipefail
