@@ -7,7 +7,7 @@ Issue: #12185
 1. Install the locked dependencies with the documented Node 22/npm toolchain and build the workspace prerequisites.
 2. Build `packages/web-shell` and run the focused package-boundary and built-artifact suites.
 3. All declared runtime JavaScript dependencies and subpaths must remain external in the published entries. Dependency stylesheet subpaths must stay bundled so the package's scoped CSS injector can ship their styles.
-4. Run the upstream `scripts/verify-publish-artifacts.mjs` prepublish guard merged in #12188. It must reject missing export targets or repository-only declaration aliases; do not duplicate that verifier in this branch.
+4. Run the upstream `packages/web-shell/scripts/verify-publish-artifacts.mjs` prepublish guard merged in #12188. It must reject missing export targets, repository-only declaration aliases, or files missing from the packed artifact; do not duplicate that verifier in this branch.
 5. Pack the real SDK and Web Shell artifacts. Install them in an external consumer without repository aliases, resolve all exported entrypoints, and repeat module resolution through a symlinked consumer.
 
 ## Read-only document verification
