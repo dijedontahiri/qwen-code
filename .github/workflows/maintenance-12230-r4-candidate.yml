@@ -1,9 +1,9 @@
-name: Validate issue 12230 review fixes
+name: Validate issue 12230 final review candidate
 
 on:
   push:
     branches:
-      - validation/12230-r4-candidate
+      - validation/12230-review-r7-validator
     paths:
       - .github/workflows/maintenance-12230-r4-candidate.yml
 
@@ -16,28 +16,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      BASE_SHA: aec6623e184a3d58502f712c8cc6b9e2af54bb77
+      CANDIDATE_SHA: 476f1e9dfa00160c949da7238c284f7b405a8898
+      PUBLIC_HEAD_SHA: aec6623e184a3d58502f712c8cc6b9e2af54bb77
       PROD_FILE: packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx
       TEST_FILE: packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx
+      REARM_TEST: withholds the live settlement while a journal repair targets the same prompt
+      FAILURE_TEST: keeps the retained transcript and reports one repair failure
       NO_COLOR: '1'
-      EXPECTED_PROD_SHA256: 9e156a50a05beeaef4441980c072c34cbdffaef0a7d47ef85ce79addce6f2c73
-      EXPECTED_TEST_SHA256: 4308aab29d13bb1d42c29121e511ef2e21aeb331a666a90db471060a07d95602
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: dijedontahiri/qwen-code
-          ref: aec6623e184a3d58502f712c8cc6b9e2af54bb77
-          fetch-depth: 1
+          ref: 476f1e9dfa00160c949da7238c284f7b405a8898
+          fetch-depth: 2
           persist-credentials: false
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 22.16.0
-      - name: Verify immutable source identity
+
+      - name: Verify immutable candidate identity and runtime
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PUBLIC_HEAD_SHA"
           test -z "$(git status --short)"
-          node -e "const p=require('./package.json'); if (!p.packageManager.startsWith('pnpm@11.24.0')) throw new Error('unexpected packageManager '+p.packageManager)"
+          git diff --check "$PUBLIC_HEAD_SHA" "$CANDIDATE_SHA"
+          mapfile -t changed < <(git diff --name-only "$PUBLIC_HEAD_SHA" "$CANDIDATE_SHA")
+          printf '%s\n' "${changed[@]}"
+          test "${#changed[@]}" -eq 2
+          printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
+          printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
+          node -e "const p=require('./package.json'); if (!p.packageManager.startsWith('pnpm@11.24.0')) throw new Error('unexpected packageManager '+p.packageManager); if (!String(p.engines?.node||'').includes('>=22')) throw new Error('unexpected node engine')"
+          node --version
+          corepack pnpm --version
+          df -h .
+
       - name: Install locked dependencies and build workspace
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -45,62 +59,127 @@ jobs:
           set -euo pipefail
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
           npm run build
-          git restore --source=HEAD --staged --worktree .
-          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          git restore --source="$CANDIDATE_SHA" --staged --worktree .
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test -z "$(git status --short)"
-      - name: Reconstruct exact reviewed candidate
-        env:
-          CANDIDATE_PATCH_GZ_B64: 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
+
+      - name: Prove re-arm regression fails without the review fix
         run: |
           set -euo pipefail
-          printf '%s' "$CANDIDATE_PATCH_GZ_B64" | base64 --decode | gzip -d > "$RUNNER_TEMP/candidate.patch"
-          git apply --check "$RUNNER_TEMP/candidate.patch"
-          git apply "$RUNNER_TEMP/candidate.patch"
+          python3 <<'PY'
+          from pathlib import Path
+          import os
+          p = Path(os.environ['PROD_FILE'])
+          s = p.read_text()
+          old = """                  if (existingRepair?.withheldSettlement) {
+                    publishPromptSettlement(existingRepair.withheldSettlement);
+                  }
+          """
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one re-arm release block, got {s.count(old)}')
+          p.write_text(s.replace(old, '', 1))
+          PY
           git diff --check
-          mapfile -t changed < <(git diff --name-only)
-          test "${#changed[@]}" -eq 2
-          printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
-          printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
-          test "$(sha256sum "$PROD_FILE" | cut -d' ' -f1)" = "$EXPECTED_PROD_SHA256"
-          test "$(sha256sum "$TEST_FILE" | cut -d' ' -f1)" = "$EXPECTED_TEST_SHA256"
+          set +e
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$REARM_TEST") >"$RUNNER_TEMP/rearm-negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/rearm-negative.log"
+          test "$status" -ne 0
+          grep -F '1 failed' "$RUNNER_TEMP/rearm-negative.log"
+          grep -F '1 passed' "$RUNNER_TEMP/rearm-negative.log"
+          grep -F 'repair re-arms' "$RUNNER_TEMP/rearm-negative.log"
+          git restore --source="$CANDIDATE_SHA" -- "$PROD_FILE"
+          test -z "$(git status --short)"
+
+      - name: Prove failure path stays fail-closed
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import os
+          p = Path(os.environ['PROD_FILE'])
+          s = p.read_text()
+          old = """            recoverable: true,
+          });
+          liveJournalRepairRef.current = undefined;
+        },
+      );
+          """
+          new = """            recoverable: true,
+          });
+          if (repair.withheldSettlement) {
+            publishPromptSettlement(repair.withheldSettlement);
+          }
+          liveJournalRepairRef.current = undefined;
+        },
+      );
+          """
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one repair failure catch anchor, got {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+          set +e
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$FAILURE_TEST") >"$RUNNER_TEMP/failure-negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/failure-negative.log"
+          test "$status" -ne 0
+          grep -F '7 failed' "$RUNNER_TEMP/failure-negative.log"
+          grep -F 'to deeply equal []' "$RUNNER_TEMP/failure-negative.log"
+          grep -F '"promptId": "prompt-live"' "$RUNNER_TEMP/failure-negative.log"
+          git restore --source="$CANDIDATE_SHA" -- "$PROD_FILE"
+          test -z "$(git status --short)"
+
+      - name: Run focused corrected regressions
+        run: |
+          set -euo pipefail
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$REARM_TEST") 2>&1 | tee "$RUNNER_TEMP/rearm-positive.log"
+          grep -F '2 passed' "$RUNNER_TEMP/rearm-positive.log"
+          (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx -t "$FAILURE_TEST") 2>&1 | tee "$RUNNER_TEMP/failure-positive.log"
+          grep -F '7 passed' "$RUNNER_TEMP/failure-positive.log"
+
       - name: Run complete affected test file
         run: |
           set -euo pipefail
           (cd packages/web-shell && npx vitest run --config vitest.config.ts client/daemon/session/DaemonSessionProvider.test.tsx) 2>&1 | tee "$RUNNER_TEMP/affected-file.log"
           grep -F 'Test Files  1 passed (1)' "$RUNNER_TEMP/affected-file.log"
           grep -F 'Tests  411 passed (411)' "$RUNNER_TEMP/affected-file.log"
+
       - name: Run Web Shell type lint and format checks
         run: |
           set -euo pipefail
           (cd packages/web-shell && npm run typecheck)
           (cd packages/web-shell && npm run lint)
           (cd packages/web-shell && npm run format:check)
+
       - name: Verify exact candidate scope before repository preflight
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$BASE_SHA"
-          git diff --check
-          mapfile -t changed < <(git diff --name-only)
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PUBLIC_HEAD_SHA"
+          test -z "$(git status --short)"
+          git diff --check "$PUBLIC_HEAD_SHA" "$CANDIDATE_SHA"
+          mapfile -t changed < <(git diff --name-only "$PUBLIC_HEAD_SHA" "$CANDIDATE_SHA")
           test "${#changed[@]}" -eq 2
           printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
           printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
-          test "$(sha256sum "$PROD_FILE" | cut -d' ' -f1)" = "$EXPECTED_PROD_SHA256"
-          test "$(sha256sum "$TEST_FILE" | cut -d' ' -f1)" = "$EXPECTED_TEST_SHA256"
-          test -z "$(git diff --cached --name-only)"
+
       - name: Run literal repository preflight
         run: |
           set -euo pipefail
           npm run preflight
+
       - name: Final immutable source and residue audit
         if: always()
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$BASE_SHA"
-          git diff --check
-          mapfile -t changed < <(git diff --name-only)
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PUBLIC_HEAD_SHA"
+          git diff --check "$PUBLIC_HEAD_SHA" "$CANDIDATE_SHA"
+          mapfile -t changed < <(git diff --name-only "$PUBLIC_HEAD_SHA" "$CANDIDATE_SHA")
           test "${#changed[@]}" -eq 2
           printf '%s\n' "${changed[@]}" | grep -Fx "$PROD_FILE"
           printf '%s\n' "${changed[@]}" | grep -Fx "$TEST_FILE"
-          test "$(sha256sum "$PROD_FILE" | cut -d' ' -f1)" = "$EXPECTED_PROD_SHA256"
-          test "$(sha256sum "$TEST_FILE" | cut -d' ' -f1)" = "$EXPECTED_TEST_SHA256"
-          test -z "$(git diff --cached --name-only)"
+          test -z "$(git status --short)"
