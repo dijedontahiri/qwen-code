@@ -45,8 +45,14 @@ const daemonProxy: ProxyOptions = {
   },
 };
 
+const managedAgentJavaProxy: ProxyOptions = {
+  target: process.env['QWEN_MANAGED_AGENT_JAVA_URL'] ?? 'http://127.0.0.1:8080',
+  changeOrigin: true,
+};
+
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
+export const MANAGED_AGENT_JAVA_ROUTE_PROXY = '/api/agent/web-shell/v1';
 
 // Exact-path on purpose. A bare `/brand` prefix would also match
 // `/brandContext.ts` — the client source module `main.tsx` and `App.tsx` import
@@ -59,10 +65,11 @@ export const BRAND_ROUTE_PROXY = '^/brand/?$';
 // bridge hangs in `connecting`.
 export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
 
-// Shared with vite.lib.config.ts so the app and lib builds can never drift
-// onto different syntax floors: esbuild miscompiles xterm's logical
-// assignments below ES2021 (#11643), and the lib build bundles the same
-// xterm for npm hosts.
+// Shared with vite.lib.config.ts so app and library builds do not drift onto
+// different syntax floors. The app still bundles xterm, whose logical
+// assignments esbuild miscompiles below ES2021 (#11643). Library entries
+// externalize declared runtime packages, but share the floor to keep public
+// output and future bundling changes aligned.
 export const WEB_SHELL_BUILD_TARGET = 'es2021';
 
 // Development permits same-origin ancestors; production denies them by default.
@@ -142,6 +149,13 @@ export default defineConfig(({ command }) => ({
     target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
+    // The Live Voice capture worklet is loaded with audioWorklet.addModule(),
+    // which the Web Shell CSP (`script-src 'self'`, no `data:`) only allows
+    // from a same-origin URL. At ~2 KB it is under Vite's default inline
+    // limit and would be turned into a `data:` URL — silently, because the
+    // client then falls back to the main-thread capture node. Keep it a file.
+    assetsInlineLimit: (filePath) =>
+      /[\\/]live[\\/]capture-worklet\.js$/.test(filePath) ? false : undefined,
     rollupOptions: {
       input: {
         index: resolve(__dirname, 'client/index.html'),
@@ -166,6 +180,7 @@ export default defineConfig(({ command }) => ({
     },
     port: 5173,
     proxy: {
+      [MANAGED_AGENT_JAVA_ROUTE_PROXY]: managedAgentJavaProxy,
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
       // Web Shell brand (`GET /brand`). Without it the SPA fallback answers with
@@ -185,6 +200,12 @@ export default defineConfig(({ command }) => ({
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
+      // Remote-daemon browse/register proxies. Keys are path-prefix matches,
+      // so the `/workspace` entry above cannot reach these; without them the
+      // SPA fallback returns index.html in dev and the Add-workspace dialog
+      // fails JSON parsing on the browse leg.
+      '/remote-workspace-path-suggestions': daemonProxy,
+      '/remote-workspaces': daemonProxy,
       '/extensions': daemonProxy,
       '/file': daemonProxy,
       '/stat': daemonProxy,
