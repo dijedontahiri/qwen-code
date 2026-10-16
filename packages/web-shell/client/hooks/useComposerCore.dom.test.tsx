@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { undo } from '@codemirror/commands';
+import { EditorView } from '@codemirror/view';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
@@ -35,6 +36,7 @@ function Harness({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
   allowEmptySlashMenu,
   cycleModeOnTab,
@@ -61,6 +63,7 @@ function Harness({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
   cycleModeOnTab?: boolean;
@@ -89,6 +92,7 @@ function Harness({
     atWorkspaceCwd,
     composerScopeKey,
     disableLegacyHistoryFallback,
+    shellModeEnabled,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
@@ -119,6 +123,7 @@ async function mount({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
   allowEmptySlashMenu,
   cycleModeOnTab,
@@ -145,6 +150,7 @@ async function mount({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
   cycleModeOnTab?: boolean;
@@ -182,6 +188,7 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             composerScopeKey={composerScopeKey}
             disableLegacyHistoryFallback={disableLegacyHistoryFallback}
+            shellModeEnabled={shellModeEnabled}
             commands={currentCommands}
             allowEmptySlashMenu={currentAllowEmptySlashMenu}
             cycleModeOnTab={cycleModeOnTab}
@@ -459,7 +466,10 @@ describe('useComposerCore history and drafts', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1039,6 +1049,54 @@ describe('useComposerCore history and drafts', () => {
     expect(latest!.searchState.searchMatches).toEqual([]);
   });
 
+  it('keeps submitted slash commands out of desktop history search matches', async () => {
+    const workspaceCwd = '/workspace/desktop-slash-filter';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['/theme dark', 'plain prompt']),
+    );
+    await mount({
+      sessionId: 'session-desktop-slash',
+      atWorkspaceCwd: workspaceCwd,
+    });
+
+    act(() => latest!.searchState.openHistorySearch());
+    // The desktop panel hides slash entries because the slash completion
+    // menu re-offers them; only the touch backend lists them (pinned by the
+    // mobile suite).
+    expect(latest!.searchState.searchMatches).toEqual(['plain prompt']);
+  });
+
+  it('keeps the stored draft when a history panel recall is followed by a session switch', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/panel-recall',
+    });
+    act(() => {
+      latest!.setText('older saved input');
+      latest!.submitText();
+      latest!.setText('my draft');
+    });
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    expect(latest!.getText()).toBe('older saved input');
+    // The panel click flow closes without restoring the pre-search draft.
+    act(() => latest!.searchState.closeSearch(false));
+
+    mounted.switchSession('session-b', '/workspace/panel-recall');
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    mounted.switchSession('session-a', '/workspace/panel-recall');
+    expect(latest!.getText()).toBe('my draft');
+  });
+
   it('flushes the draft to localStorage on visibilitychange and pagehide', async () => {
     vi.useFakeTimers();
     await mount({
@@ -1108,7 +1166,10 @@ describe('useComposerCore paste', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1295,7 +1356,10 @@ describe('useComposerCore paste', () => {
         },
       ],
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1335,7 +1399,10 @@ describe('useComposerCore paste', () => {
         },
       ],
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1361,6 +1428,51 @@ describe('useComposerCore paste', () => {
     expect.soft(event.defaultPrevented).toBe(false);
     expect.soft(latest!.pastedFiles).toEqual([]);
     expect.soft(latest!.getText()).toBe('');
+  });
+
+  it('keeps "!" and "?" typed into a focused Managed composer literal', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    const view = EditorView.findFromDOM(
+      document.querySelector<HTMLElement>('.cm-content')!,
+    )!;
+    for (const key of ['!', '?']) {
+      const handled = view.state
+        .facet(EditorView.inputHandler)
+        .some((handler) =>
+          handler(view, 0, 0, key, () =>
+            view.state.update({ changes: { from: 0, insert: key } }),
+          ),
+        );
+      expect({ key, handled }).toEqual({ key, handled: false });
+      expect(latest!.shellMode).toBe(false);
+    }
+  });
+
+  it('keeps Managed bang input literal and cannot enter the global Shell history mode', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(false);
+    act(() => latest!.setShellMode(true));
+    expect(latest!.shellMode).toBe(false);
+    const event = new KeyboardEvent('keydown', {
+      key: '!',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      (document.activeElement as HTMLElement)?.blur();
+      document.body.dispatchEvent(event);
+    });
+    expect(latest!.shellMode).toBe(false);
+    expect(latest!.getText()).toBe('!');
   });
 
   it('leaves a long paste inline in shell mode', async () => {
@@ -1555,7 +1667,10 @@ describe('useComposerCore paste', () => {
       [expect.objectContaining({ media_type: 'image/png' })],
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1597,7 +1712,10 @@ describe('useComposerCore paste', () => {
         expect.objectContaining({ name: 'my app (1).log' }),
       ],
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1930,7 +2048,11 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      { inputAnnotations },
+      {
+        inputAnnotations,
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1967,6 +2089,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({ start: 0, end: 2, text: '@b' }),
           expect.objectContaining({ start: 7, end: 9, text: '@a' }),
@@ -2001,6 +2125,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 7,
@@ -2037,7 +2163,10 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -2152,8 +2281,18 @@ describe('useComposerCore tags', () => {
         }
         return appendChild.call(this, child);
       });
+    // The failed tooltip root's unmount is only observable from inside the
+    // catch: mount()'s act() drains the deferred microtask before returning.
+    const probeRoot = createRoot(document.createElement('span'));
+    const unmount = vi.spyOn(
+      Object.getPrototypeOf(probeRoot) as Root,
+      'unmount',
+    );
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {
       expect(readFailingChipTitle?.()).toBe('Details');
+      // Root.unmount() flushes sync work across ALL roots, which would re-enter
+      // CodeMirror mid-update (#12826), so it must not run inside the catch.
+      expect(unmount).not.toHaveBeenCalled();
     });
 
     try {
@@ -2169,6 +2308,8 @@ describe('useComposerCore tags', () => {
         '[WebShell] inline tag tooltip render failed',
         error,
       );
+      // Deferred, not skipped: the failed root is still unmounted exactly once.
+      expect(unmount).toHaveBeenCalledTimes(1);
       const chip = document.body.querySelector('[title="Details"]');
       expect(chip).not.toBeNull();
       expect(document.body.querySelector('[role="tooltip"]')).toBeNull();
@@ -2176,6 +2317,8 @@ describe('useComposerCore tags', () => {
       expect(failingTooltip?.style.display).toBe('none');
     } finally {
       warn.mockRestore();
+      unmount.mockRestore();
+      probeRoot.unmount();
       appendChildSpy.mockRestore();
     }
   });
@@ -2367,6 +2510,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           {
             end: 9,
@@ -2428,6 +2573,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2608,6 +2755,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2669,6 +2818,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2706,7 +2857,10 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -2751,7 +2905,10 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -2788,6 +2945,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2800,5 +2959,101 @@ describe('useComposerCore tags', () => {
     );
     expect(editor.textContent).toContain('orders');
     expect(editor.textContent).not.toContain(serialized);
+  });
+});
+
+it('invalidates a pending capacity continuation when the composer draft changes', async () => {
+  const onSubmit = vi.fn(() => false);
+  await mount({ onSubmit });
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const metadata = onSubmit.mock.calls[0]?.[4] as unknown as {
+    isCurrentDraft(): boolean;
+  };
+  expect(metadata.isCurrentDraft()).toBe(true);
+  act(() => latest!.setText('new draft'));
+  expect(metadata.isCurrentDraft()).toBe(false);
+  act(() => latest!.setText('original'));
+  expect(metadata.isCurrentDraft()).toBe(false);
+});
+
+it('retains the guarded retry draft across its initial session allocation and clears it only on acceptance', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(
+    async (onSessionAllocated) => {
+      onSessionAllocated('created-session');
+      mounted.switchSession('created-session', '/work/b');
+      await act(async () => {});
+      expect(latest!.getText()).toBe('original');
+      expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+        true,
+      );
+      act(() => call[3]());
+    },
+  );
+  expect(latest!.getText()).toBe('');
+});
+
+it('unrelated existing session keeps its draft during retry creation', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  localStorage.setItem(getSessionDraftKey('existing-b'), 'B draft');
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(async () => {
+    mounted.switchSession('existing-b', '/work/b');
+    await act(async () => {});
+    expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+      false,
+    );
+    expect(latest!.getText()).toBe('B draft');
+    expect(localStorage.getItem(getSessionDraftKey('existing-b'))).toBe(
+      'B draft',
+    );
+  });
+});
+it('late acceptance does not clear unrelated existing session draft', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  localStorage.setItem(getSessionDraftKey('existing-b'), 'B draft');
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(async () => {
+    mounted.switchSession('existing-b', '/work/b');
+    await act(async () => {});
+    act(() => call[3]());
+    expect(latest!.getText()).toBe('B draft');
   });
 });
